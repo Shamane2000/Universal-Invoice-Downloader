@@ -44,3 +44,4 @@ All scripts run **100% locally** within your browser via Tampermonkey. No creden
 
 ## 📜 License
 GPL-3.0 License.
+
