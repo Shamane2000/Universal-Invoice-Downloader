@@ -287,6 +287,13 @@ export class AmazonAdapter {
     return -1;
   }
 
+  getTotalOrdersFromPage() {
+    const text = cleanString(document.body.textContent || "");
+    const m = text.match(/(\d+)\s+(?:bestellungen|orders)\b/i);
+    if (m) return parseInt(m[1], 10);
+    return null;
+  }
+
   async loadMorePages() {
     const loadBtn = document.getElementById("uid-load-btn");
     if (this.isLoadingPages) {
@@ -295,34 +302,55 @@ export class AmazonAdapter {
       return;
     }
 
+    const totalOrders = this.getTotalOrdersFromPage();
     const liveStartIndex = Math.max(0, this.getStartIndexFromUrl(window.location.href));
     const visitedStartIndexes = new Set([liveStartIndex]);
     const queue = [];
 
-    const addUrlToQueue = (href, pageNum) => {
-      if (!href || href === "#" || href.startsWith("javascript:")) return;
-      const sIndex = this.getStartIndexFromUrl(href);
-      if (sIndex < 0 || visitedStartIndexes.has(sIndex)) return;
+    const baseUrl = new URL(window.location.href);
+    baseUrl.searchParams.set("disableCsd", "no-js");
 
-      visitedStartIndexes.add(sIndex);
-
-      let full = href.startsWith("http") ? href : window.location.origin + href;
-      try {
-        const u = new URL(full);
-        u.searchParams.set("disableCsd", "no-js");
-        full = u.toString();
-      } catch (e) {
-        full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
+    // Wenn Amazon "85 Bestellungen" meldet, können wir alle Seiten deterministisch berechnen!
+    if (totalOrders && totalOrders > 10) {
+      const maxIndex = (Math.ceil(totalOrders / 10) - 1) * 10;
+      for (let sIndex = 0; sIndex <= maxIndex; sIndex += 10) {
+        if (!visitedStartIndexes.has(sIndex)) {
+          visitedStartIndexes.add(sIndex);
+          const u = new URL(baseUrl.toString());
+          u.searchParams.set("startIndex", sIndex.toString());
+          queue.push({
+            num: Math.floor(sIndex / 10) + 1,
+            sIndex: sIndex,
+            url: u.toString()
+          });
+        }
       }
+    } else {
+      // Fallback: Dynamische Extraktion aus Paginierungslinks
+      const addUrlToQueue = (href, pageNum) => {
+        if (!href || href === "#" || href.startsWith("javascript:")) return;
+        const sIndex = this.getStartIndexFromUrl(href);
+        if (sIndex < 0 || visitedStartIndexes.has(sIndex)) return;
 
-      queue.push({ num: pageNum || Math.floor(sIndex / 10) + 1, sIndex: sIndex, url: full });
-    };
+        visitedStartIndexes.add(sIndex);
 
-    // Initiale Seiten aus der Live-Paginierung
-    Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected):not(.a-disabled) a")).forEach(a => {
-      const num = parseInt((a.textContent || "").trim(), 10);
-      addUrlToQueue(a.getAttribute("href"), isNaN(num) ? null : num);
-    });
+        let full = href.startsWith("http") ? href : window.location.origin + href;
+        try {
+          const u = new URL(full);
+          u.searchParams.set("disableCsd", "no-js");
+          full = u.toString();
+        } catch (e) {
+          full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
+        }
+
+        queue.push({ num: pageNum || Math.floor(sIndex / 10) + 1, sIndex: sIndex, url: full });
+      };
+
+      Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected):not(.a-disabled) a")).forEach(a => {
+        const num = parseInt((a.textContent || "").trim(), 10);
+        addUrlToQueue(a.getAttribute("href"), isNaN(num) ? null : num);
+      });
+    }
 
     queue.sort((a, b) => a.sIndex - b.sIndex);
 
@@ -339,15 +367,15 @@ export class AmazonAdapter {
     }
 
     let currentIndex = 0;
-    const totalPages = queue.length;
+    const totalToLoad = queue.length;
 
     while (currentIndex < queue.length && this.isLoadingPages) {
       const p = queue[currentIndex];
       currentIndex++;
 
-      const pct = Math.round((currentIndex / Math.max(1, queue.length)) * 100);
+      const pct = Math.round((currentIndex / totalToLoad) * 100);
       this.ui.setProgress(pct);
-      this.ui.setStatus(`⏳ Lade Seite ${currentIndex} von ${queue.length} (${this.ui.ordersMap.size} Bestellungen erfasst)...`);
+      this.ui.setStatus(`⏳ Lade Seite ${p.num} von ${Math.ceil((totalOrders || queue.length * 10) / 10)} (${this.ui.ordersMap.size} Bestellungen erfasst)...`);
 
       try {
         const response = await requestHtml(p.url);
@@ -355,15 +383,6 @@ export class AmazonAdapter {
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         this.collectOrders(doc, false);
-
-        // Dynamisch neue Seiten aus geladenem HTML entdecken (z.B. hinter "...")
-        Array.from(doc.querySelectorAll(".a-pagination li:not(.a-selected):not(.a-disabled) a")).forEach(a => {
-          const num = parseInt((a.textContent || "").trim(), 10);
-          addUrlToQueue(a.getAttribute("href"), isNaN(num) ? null : num);
-        });
-
-        // Queue stabil nach startIndex sortieren
-        queue.sort((a, b) => a.sIndex - b.sIndex);
 
         await sleep(1200);
       } catch (err) {
