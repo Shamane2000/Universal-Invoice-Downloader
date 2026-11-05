@@ -1,16 +1,16 @@
 /**
  * Amazon Shop Adapter
- * Uses verified data-csa-c-slot-id attribute for 100% order ID precision
+ * Uses verified data-csa-c-slot-id attribute for 100% order ID precision,
+ * thumbnail extraction for Quickinfo-Hover, and robust multi-page pagination.
  */
 
 import { cleanString, parseGermanDate, sanitizeTitle, requestHtml, sleep } from "../core/utils.js";
 
 export class AmazonAdapter {
-  constructor() {
+  constructor(ui) {
     this.name = "Amazon";
     this.icon = "📦";
-    this.ui = null;
-    this.downloader = null;
+    this.ui = ui;
     this.isLoadingPages = false;
   }
 
@@ -74,11 +74,8 @@ export class AmazonAdapter {
     document.head.appendChild(style);
   }
 
-  init(ui, downloader) {
-    this.ui = ui;
-    this.downloader = downloader;
+  init() {
     this.injectStyles();
-
     this.collectOrders(document, true);
     setInterval(() => this.collectOrders(document, true), 2000);
 
@@ -100,23 +97,23 @@ export class AmazonAdapter {
   }
 
   extractOrderId(card) {
-    // 1. Primär: data-csa-c-slot-id (amzn1.yourorders.order-card.306-XXXXXXX-XXXXXXX)
+    // 1. Verifizierter Primär-Pfad: data-csa-c-slot-id (amzn1.yourorders.order-card.306-XXXXXXX-XXXXXXX)
     const slotId = card.getAttribute("data-csa-c-slot-id") || "";
     const slotMatch = slotId.match(/(\d{3}-\d{7}-\d{7})/);
     if (slotMatch) return slotMatch[1];
 
-    // 2. data-order-id Attribut
+    // 2. data-order-id
     const dataOid = card.getAttribute("data-order-id") || card.dataset?.orderId || "";
     if (dataOid && /\d{3}-\d{7}-\d{7}/.test(dataOid)) return dataOid;
 
-    // 3. Detail-Links innerhalb der Karte
+    // 3. Detail-Links
     const link = card.querySelector("a[href*='orderID='], a[href*='orderId=']");
     if (link) {
       const hrefMatch = (link.getAttribute("href") || "").match(/(\d{3}-\d{7}-\d{7})/);
       if (hrefMatch) return hrefMatch[1];
     }
 
-    // 4. innerHTML Suche
+    // 4. InnerHTML Fallback
     const rawMatch = (card.innerHTML || "").match(/(\d{3}-\d{7}-\d{7})/);
     if (rawMatch) return rawMatch[1];
 
@@ -135,26 +132,38 @@ export class AmazonAdapter {
       const isCancelled = /storniert|cancelled/i.test(cleanCardText);
       const isRefunded = /erstattet|refunded/i.test(cleanCardText);
 
-      // Datum
-      let dateMatch = cleanCardText.match(/(\d{1,2}\.\s+[a-zA-ZäöüÄÖÜ]+\s+\d{4})/);
+      // Datum ermitteln
+      let dateMatch = cleanCardText.match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
+      if (!dateMatch && card.parentElement) {
+        dateMatch = cleanString(card.parentElement.textContent || "").match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
+      }
       const rawDate = dateMatch ? dateMatch[1] : "";
       const isoDate = parseGermanDate(rawDate);
 
-      // Titel
+      // Bild / Thumbnail für Quickinfo-Hover
+      let imageUrl = "";
+      const img = card.querySelector("img[src*='images-amazon'], img[src*='media-amazon'], img[src*='ssl-images-amazon'], img[data-a-hires]");
+      if (img) {
+        imageUrl = img.getAttribute("src") || img.getAttribute("data-a-hires") || "";
+      }
+
+      // Titel ermitteln
       let title = "";
-      const productLinks = Array.from(card.querySelectorAll("a[href*='/dp/'], a[href*='asin_title'], a[href*='/gp/product/']"));
-      for (const a of productLinks) {
-        const txt = cleanString(a.textContent || a.innerText || "");
-        if (txt.length > 5 && !/nochmals|locker|verfolgen|rueckgabe|bewert|widerruf|frage/i.test(txt)) {
-          title = txt;
-          break;
+      if (img && img.alt && cleanString(img.alt).length > 4) {
+        const altTxt = cleanString(img.alt);
+        if (!/produkt|artikel|bild|image|amazon/i.test(altTxt)) {
+          title = altTxt;
         }
       }
 
       if (!title) {
-        const img = card.querySelector("img[alt]");
-        if (img && img.alt && cleanString(img.alt).length > 4) {
-          title = cleanString(img.alt);
+        const productLinks = Array.from(card.querySelectorAll("a[href*='/dp/'], a[href*='/gp/product/'], a[href*='asin_title'], a.a-link-normal"));
+        for (const a of productLinks) {
+          const txt = cleanString(a.textContent || a.innerText || "");
+          if (txt.length > 5 && !/nochmals|locker|verfolgen|rueckgabe|bewert|widerruf|frage|bestelldetails|rechnung|problem/i.test(txt)) {
+            title = txt;
+            break;
+          }
         }
       }
 
@@ -164,7 +173,7 @@ export class AmazonAdapter {
 
       const shortName = sanitizeTitle(title);
 
-      // Preis
+      // Preis ermitteln
       let price = "";
       if (isCancelled) {
         price = "Storniert";
@@ -175,7 +184,7 @@ export class AmazonAdapter {
       }
       if (!price) price = isCancelled ? "Storniert" : "-";
 
-      // Popover
+      // Popover-Rechnungs-URL
       let popoverUrl = "";
       if (!isCancelled) {
         const invoiceLink = Array.from(card.querySelectorAll("a, span[data-action]")).find(el => 
@@ -205,11 +214,12 @@ export class AmazonAdapter {
         title: title,
         shortName: shortName,
         price: price,
+        imageUrl: imageUrl,
         popoverUrl: popoverUrl,
         cardElement: isLivePage ? card : null
       });
 
-      // Checkbox auf Live-Seite
+      // Checkbox auf Live-Seite einhängen
       if (isLivePage && !card.querySelector(".uid-card-cb")) {
         const header = card.querySelector(".order-header, .yohtmlc-order-header, .a-box-header") || card.firstElementChild;
         if (header) {

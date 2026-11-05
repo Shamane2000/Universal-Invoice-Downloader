@@ -1,5 +1,5 @@
 /**
- * Core UI: Universal Floating Dashboard, Table, Live Search & Progress Bar
+ * Core UI: Universal Floating Dashboard, Table, Live Search, Hover-Quickinfo & Progress Bar
  */
 
 export class UniversalDashboard {
@@ -14,6 +14,7 @@ export class UniversalDashboard {
 
     this.panel = null;
     this.tbody = null;
+    this.tooltipEl = null;
   }
 
   mount() {
@@ -120,7 +121,33 @@ export class UniversalDashboard {
     document.body.appendChild(this.panel);
     this.tbody = document.getElementById("uid-tbody");
 
+    // Quickinfo Hover Tooltip Element erzeugen
+    this.createTooltipElement();
+
     this.bindEvents();
+  }
+
+  createTooltipElement() {
+    if (document.getElementById("uid-quickinfo-tooltip")) return;
+    this.tooltipEl = document.createElement("div");
+    this.tooltipEl.id = "uid-quickinfo-tooltip";
+    this.tooltipEl.style.cssText = `
+      position: fixed;
+      display: none;
+      z-index: 1000000;
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+      padding: 10px 12px;
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 11px;
+      color: #0f1111;
+      pointer-events: none;
+      transition: opacity 0.15s ease-in-out;
+    `;
+    document.body.appendChild(this.tooltipEl);
   }
 
   bindEvents() {
@@ -157,7 +184,18 @@ export class UniversalDashboard {
     };
 
     this.panel.querySelector("#uid-copy-debug").onclick = () => {
-      if (this.callbacks.onDebug) this.callbacks.onDebug();
+      const debug = {
+        orderCount: this.ordersMap.size,
+        selectedCount: this.selectedOrders.size,
+        ordersSample: Array.from(this.ordersMap.values()).slice(0, 5)
+      };
+      const str = JSON.stringify(debug, null, 2);
+      if (typeof GM_setClipboard === "function") GM_setClipboard(str);
+      else navigator.clipboard.writeText(str);
+
+      const btn = this.panel.querySelector("#uid-copy-debug");
+      btn.textContent = "✅ Kopiert!";
+      setTimeout(() => (btn.textContent = "📋 Debug"), 2000);
     };
 
     this.panel.querySelector("#uid-search").oninput = () => this.applyFilter();
@@ -214,6 +252,44 @@ export class UniversalDashboard {
     return addedCount;
   }
 
+  showQuickinfo(e, info) {
+    if (!this.tooltipEl) return;
+    const thumbHtml = info.imageUrl ? `<img src="${info.imageUrl}" style="width:48px;height:48px;object-fit:contain;border:1px solid #e2e8f0;border-radius:4px;background:#fff;margin-right:10px;flex-shrink:0;">` : "";
+
+    this.tooltipEl.innerHTML = `
+      <div style="display:flex;align-items:flex-start;">
+        ${thumbHtml}
+        <div style="flex:1;overflow:hidden;">
+          <div style="font-weight:700;font-size:12px;line-height:1.3;margin-bottom:4px;color:#0f1111;">${info.title || info.shortName}</div>
+          <div style="color:#64748b;font-size:10px;margin-bottom:2px;">Bestell-Nr: <b>${info.id}</b></div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;">
+            <span style="color:#475569;">📅 ${info.rawDate || info.date}</span>
+            <span style="font-weight:700;color:${info.price === 'Storniert' ? '#c62828' : '#047857'};">${info.price}</span>
+          </div>
+          <div style="margin-top:6px;font-size:10px;color:#0284c7;">💡 Klick öffnet Bestelldetails in neuem Tab</div>
+        </div>
+      </div>
+    `;
+
+    // Positionieren links neben dem Dashboard
+    const rect = this.panel.getBoundingClientRect();
+    let leftPos = rect.left - 295;
+    if (leftPos < 10) leftPos = 10;
+    let topPos = e.clientY - 40;
+    if (topPos < 10) topPos = 10;
+    if (topPos + 180 > window.innerHeight) topPos = window.innerHeight - 190;
+
+    this.tooltipEl.style.left = `${leftPos}px`;
+    this.tooltipEl.style.top = `${topPos}px`;
+    this.tooltipEl.style.display = "block";
+  }
+
+  hideQuickinfo() {
+    if (this.tooltipEl) {
+      this.tooltipEl.style.display = "none";
+    }
+  }
+
   renderTable() {
     if (!this.tbody) return;
     this.tbody.innerHTML = "";
@@ -224,17 +300,27 @@ export class UniversalDashboard {
       const tr = document.createElement("tr");
       tr.className = "uid-table-row";
       tr.dataset.oid = info.id;
-      tr.style.cssText = "border-bottom: 1px solid #f0f0f0;";
+      tr.style.cssText = "border-bottom: 1px solid #f0f0f0; transition: background 0.15s;";
 
+      // Hover Quickinfo
+      tr.onmouseenter = (e) => this.showQuickinfo(e, info);
+      tr.onmouseleave = () => this.hideQuickinfo();
+
+      // Klickverhalten: Scrollen wenn auf Live-Page, sonst neuen Tab mit Bestelldetails öffnen!
       tr.onclick = (e) => {
-        if (e.target.tagName !== "INPUT" && info.cardElement) {
+        if (e.target.tagName === "INPUT") return;
+        if (info.cardElement && document.body.contains(info.cardElement)) {
           info.cardElement.scrollIntoView({ behavior: "smooth", block: "center" });
           info.cardElement.style.outline = "2px solid #ff9900";
           setTimeout(() => (info.cardElement.style.outline = "none"), 2000);
+        } else {
+          // Neues Tab öffnen mit der echten Amazon-Detailseite
+          const detailsUrl = `https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}`;
+          window.open(detailsUrl, "_blank");
         }
       };
 
-      const dDisplay = info.date && info.date.length === 8 ? `${info.date.slice(6, 8)}.${info.date.slice(4, 6)}.${info.date.slice(0, 4)}` : info.date;
+      const dDisplay = info.date && info.date.length === 8 ? `${info.date.slice(6, 8)}.${info.date.slice(4, 6)}.${info.date.slice(0, 4)}` : (info.rawDate || info.date);
       const isCancelled = info.price === "Storniert";
       const priceStyle = isCancelled ? "color:#c62828;font-weight:600;" : "color:#0f1111;font-weight:600;";
 
@@ -244,7 +330,9 @@ export class UniversalDashboard {
         </td>
         <td style="padding:4px;white-space:nowrap;color:#64748b;">${dDisplay}</td>
         <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;" title="${info.title}">
-          ${info.shortName}
+          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;" onclick="event.stopPropagation();">
+            ${info.shortName}
+          </a>
         </td>
         <td style="padding:4px;text-align:right;white-space:nowrap;${priceStyle}">${info.price}</td>
       `;
@@ -273,7 +361,7 @@ export class UniversalDashboard {
 
       const match = !q || 
         info.id.toLowerCase().includes(q) || 
-        info.title.toLowerCase().includes(q) || 
+        (info.title && info.title.toLowerCase().includes(q)) || 
         info.shortName.toLowerCase().includes(q) || 
         info.price.toLowerCase().includes(q) || 
         info.date.includes(q);

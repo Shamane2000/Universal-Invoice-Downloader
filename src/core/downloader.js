@@ -83,3 +83,4 @@ export class BatchDownloader {
     if (onComplete) onComplete(this.isCancelled);
   }
 }
+
