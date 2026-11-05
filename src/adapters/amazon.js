@@ -133,7 +133,12 @@ export class AmazonAdapter {
       const isRefunded = /erstattet|refunded/i.test(cleanCardText);
 
       // Datum ermitteln
-      let dateMatch = cleanCardText.match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
+      const header = card.querySelector(".order-header, .yohtmlc-order-header, .a-box-header") || card;
+      const headerText = cleanString(header.textContent || "");
+      let dateMatch = headerText.match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
+      if (!dateMatch) {
+        dateMatch = cleanCardText.match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
+      }
       if (!dateMatch && card.parentElement) {
         dateMatch = cleanString(card.parentElement.textContent || "").match(/(\d{1,2}\.\s*[a-zA-ZäöüÄÖÜ]{3,12}\.?\s*\d{4})/);
       }
@@ -142,9 +147,9 @@ export class AmazonAdapter {
 
       // Bild / Thumbnail für Quickinfo-Hover
       let imageUrl = "";
-      const img = card.querySelector("img[src*='images-amazon'], img[src*='media-amazon'], img[src*='ssl-images-amazon'], img[data-a-hires]");
+      const img = card.querySelector("img[src*='images-amazon'], img[src*='media-amazon'], img[src*='ssl-images-amazon'], img[data-a-hires], img");
       if (img) {
-        imageUrl = img.getAttribute("src") || img.getAttribute("data-a-hires") || "";
+        imageUrl = img.getAttribute("src") || img.getAttribute("data-a-hires") || img.getAttribute("data-src") || "";
       }
 
       // Titel ermitteln
@@ -157,10 +162,10 @@ export class AmazonAdapter {
       }
 
       if (!title) {
-        const productLinks = Array.from(card.querySelectorAll("a[href*='/dp/'], a[href*='/gp/product/'], a[href*='asin_title'], a.a-link-normal"));
+        const productLinks = Array.from(card.querySelectorAll(".yohtmlc-item a, a[href*='/dp/'], a[href*='/gp/product/'], a[href*='asin'], a.a-link-normal"));
         for (const a of productLinks) {
           const txt = cleanString(a.textContent || a.innerText || "");
-          if (txt.length > 5 && !/nochmals|locker|verfolgen|rueckgabe|bewert|widerruf|frage|bestelldetails|rechnung|problem/i.test(txt)) {
+          if (txt.length > 5 && !/nochmals|locker|verfolgen|rueckgabe|bewert|widerruf|frage|bestelldetails|rechnung|problem|support|hilfe|kontakt/i.test(txt)) {
             title = txt;
             break;
           }
@@ -178,8 +183,13 @@ export class AmazonAdapter {
       if (isCancelled) {
         price = "Storniert";
       } else {
-        const pMatch = cleanCardText.match(/(€\s*[\d.,]+|EUR\s*[\d.,]+|[\d.,]+\s*€)/i);
-        if (pMatch) price = pMatch[1].trim();
+        const hpMatch = headerText.match(/(€\s*[\d.,]+|EUR\s*[\d.,]+|[\d.,]+\s*€)/i);
+        if (hpMatch) {
+          price = hpMatch[1].trim();
+        } else {
+          const pMatch = cleanCardText.match(/(€\s*[\d.,]+|EUR\s*[\d.,]+|[\d.,]+\s*€)/i);
+          if (pMatch) price = pMatch[1].trim();
+        }
         if (isRefunded && price) price += " (Erstattet)";
       }
       if (!price) price = isCancelled ? "Storniert" : "-";
