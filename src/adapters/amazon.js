@@ -257,6 +257,17 @@ export class AmazonAdapter {
     this.ui.addOrders(list);
   }
 
+  getStartIndexFromUrl(urlString) {
+    try {
+      const u = new URL(urlString, window.location.origin);
+      const s = u.searchParams.get("startIndex");
+      if (s !== null && !isNaN(parseInt(s, 10))) return parseInt(s, 10);
+      const p = u.searchParams.get("page");
+      if (p !== null && !isNaN(parseInt(p, 10))) return (parseInt(p, 10) - 1) * 10;
+    } catch (e) {}
+    return -1;
+  }
+
   async loadMorePages() {
     const loadBtn = document.getElementById("uid-load-btn");
     if (this.isLoadingPages) {
@@ -265,31 +276,36 @@ export class AmazonAdapter {
       return;
     }
 
-    const visitedUrls = new Set();
+    const liveStartIndex = Math.max(0, this.getStartIndexFromUrl(window.location.href));
+    const visitedStartIndexes = new Set([liveStartIndex]);
     const queue = [];
 
-    // Initiale Seiten aus der Paginierung der Live-Seite
-    Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected) a"))
-      .map(a => ({
-        num: parseInt((a.textContent || "").trim(), 10),
-        href: a.getAttribute("href")
-      }))
-      .filter(x => x.href)
-      .sort((a, b) => (a.num || 999) - (b.num || 999))
-      .forEach(item => {
-        let full = item.href.startsWith("http") ? item.href : window.location.origin + item.href;
-        try {
-          const u = new URL(full);
-          u.searchParams.set("disableCsd", "no-js");
-          full = u.toString();
-        } catch (e) {
-          full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
-        }
-        if (!visitedUrls.has(full)) {
-          visitedUrls.add(full);
-          queue.push({ num: item.num, url: full });
-        }
-      });
+    const addUrlToQueue = (href, pageNum) => {
+      if (!href || href === "#" || href.startsWith("javascript:")) return;
+      const sIndex = this.getStartIndexFromUrl(href);
+      if (sIndex < 0 || visitedStartIndexes.has(sIndex)) return;
+
+      visitedStartIndexes.add(sIndex);
+
+      let full = href.startsWith("http") ? href : window.location.origin + href;
+      try {
+        const u = new URL(full);
+        u.searchParams.set("disableCsd", "no-js");
+        full = u.toString();
+      } catch (e) {
+        full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
+      }
+
+      queue.push({ num: pageNum || Math.floor(sIndex / 10) + 1, sIndex: sIndex, url: full });
+    };
+
+    // Initiale Seiten aus der Live-Paginierung
+    Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected):not(.a-disabled) a")).forEach(a => {
+      const num = parseInt((a.textContent || "").trim(), 10);
+      addUrlToQueue(a.getAttribute("href"), isNaN(num) ? null : num);
+    });
+
+    queue.sort((a, b) => a.sIndex - b.sIndex);
 
     if (queue.length === 0) {
       this.ui.setStatus("ℹ️ Keine weiteren Seiten auf dieser Ansicht vorhanden.");
@@ -304,11 +320,15 @@ export class AmazonAdapter {
     }
 
     let currentIndex = 0;
+    const totalPages = queue.length;
+
     while (currentIndex < queue.length && this.isLoadingPages) {
       const p = queue[currentIndex];
       currentIndex++;
 
-      this.ui.setStatus(`⏳ Lade Seite ${p.num || currentIndex + 1} (${this.ui.ordersMap.size} Bestellungen bisher)...`);
+      const pct = Math.round((currentIndex / Math.max(1, queue.length)) * 100);
+      this.ui.setProgress(pct);
+      this.ui.setStatus(`⏳ Lade Seite ${currentIndex} von ${queue.length} (${this.ui.ordersMap.size} Bestellungen erfasst)...`);
 
       try {
         const response = await requestHtml(p.url);
@@ -317,39 +337,32 @@ export class AmazonAdapter {
 
         this.collectOrders(doc, false);
 
-        // Weitere Seiten aus dem geladenen HTML entdecken
-        Array.from(doc.querySelectorAll(".a-pagination li:not(.a-selected) a, li.a-last a")).forEach(a => {
-          const href = a.getAttribute("href");
-          if (!href) return;
-          let nextUrl = href.startsWith("http") ? href : window.location.origin + href;
-          try {
-            const u = new URL(nextUrl);
-            u.searchParams.set("disableCsd", "no-js");
-            nextUrl = u.toString();
-          } catch (e) {
-            nextUrl += (nextUrl.includes("?") ? "&" : "?") + "disableCsd=no-js";
-          }
-          if (!visitedUrls.has(nextUrl)) {
-            visitedUrls.add(nextUrl);
-            const num = parseInt((a.textContent || "").trim(), 10);
-            queue.push({ num: num || (queue.length + 2), url: nextUrl });
-          }
+        // Dynamisch neue Seiten aus geladenem HTML entdecken (z.B. hinter "...")
+        Array.from(doc.querySelectorAll(".a-pagination li:not(.a-selected):not(.a-disabled) a")).forEach(a => {
+          const num = parseInt((a.textContent || "").trim(), 10);
+          addUrlToQueue(a.getAttribute("href"), isNaN(num) ? null : num);
         });
 
-        await sleep(1400);
+        // Queue stabil nach startIndex sortieren
+        queue.sort((a, b) => a.sIndex - b.sIndex);
+
+        await sleep(1200);
       } catch (err) {
-        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num || currentIndex}: ${err.message}`);
+        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num}: ${err.message}`);
         break;
       }
     }
 
     this.isLoadingPages = false;
+    this.ui.setProgress(100);
+    setTimeout(() => this.ui.setProgress(-1), 3000);
+
     if (loadBtn) {
       loadBtn.textContent = "🔄 Alle Seiten nachladen";
       loadBtn.style.background = "#f0f2f5";
       loadBtn.style.borderColor = "#d1d5db";
     }
-    this.ui.setStatus(`🎉 Fertig! ${this.ui.ordersMap.size} Bestellungen in der Tabelle.`);
+    this.ui.setStatus(`🎉 Fertig! Alle ${this.ui.ordersMap.size} Bestellungen erfasst & geladen.`);
   }
 
   async resolveDownloadInfo(order) {
