@@ -2,6 +2,8 @@
  * Core UI: Universal Floating Dashboard, Table, Live Search, Hover-Quickinfo & Progress Bar
  */
 
+import { cleanString, parseNumericPrice } from "./utils.js";
+
 export class UniversalDashboard {
   constructor(options = {}) {
     this.shopName = options.shopName || "Universal";
@@ -10,6 +12,8 @@ export class UniversalDashboard {
     this.selectedOrders = new Set();
     this.isMinimized = false;
     this.isCompacted = false;
+    this.sortColumn = "date";
+    this.sortDirection = "desc";
     this.callbacks = options.callbacks || {};
 
     this.panel = null;
@@ -86,9 +90,10 @@ export class UniversalDashboard {
             <thead style="background:#f1f5f9; position:sticky; top:0; z-index:10; border-bottom:1px solid #cbd5e1;">
               <tr>
                 <th style="padding:5px; width:24px; text-align:center;"><input type="checkbox" id="uid-th-cb" style="cursor:pointer;"></th>
-                <th style="padding:5px; width:75px;">Datum</th>
-                <th style="padding:5px;">Artikel</th>
-                <th style="padding:5px; width:65px; text-align:right;">Betrag</th>
+                <th class="uid-th-sort" data-sort="date" style="padding:5px; width:75px; cursor:pointer; user-select:none;" title="Klick: Nach Datum sortieren">Datum <span id="uid-sort-date" style="color:#ff9900;">▼</span></th>
+                <th class="uid-th-sort" data-sort="title" style="padding:5px; cursor:pointer; user-select:none;" title="Klick: Nach Artikel sortieren">Artikel <span id="uid-sort-title" style="color:#ff9900;"></span></th>
+                <th class="uid-th-sort" data-sort="quantity" style="padding:5px; width:45px; text-align:center; cursor:pointer; user-select:none;" title="Klick: Nach Menge sortieren">Stk. <span id="uid-sort-quantity" style="color:#ff9900;"></span></th>
+                <th class="uid-th-sort" data-sort="price" style="padding:5px; width:65px; text-align:right; cursor:pointer; user-select:none;" title="Klick: Nach Betrag sortieren">Betrag <span id="uid-sort-price" style="color:#ff9900;"></span></th>
               </tr>
             </thead>
             <tbody id="uid-tbody"></tbody>
@@ -246,6 +251,20 @@ export class UniversalDashboard {
     this.panel.querySelector("#uid-test-btn").onclick = () => {
       if (this.callbacks.onDownloadTest) this.callbacks.onDownloadTest();
     };
+
+    // Sortierung per Klick auf Tabellen-Spaltentitel
+    this.panel.querySelectorAll(".uid-th-sort").forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.sort;
+        if (this.sortColumn === col) {
+          this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
+        } else {
+          this.sortColumn = col;
+          this.sortDirection = (col === "title") ? "asc" : "desc";
+        }
+        this.renderTable();
+      };
+    });
   }
 
   addOrders(orderList) {
@@ -296,12 +315,12 @@ export class UniversalDashboard {
         ${thumbHtml}
         <div style="flex:1;overflow:hidden;">
           <div style="font-weight:700;font-size:12px;line-height:1.3;margin-bottom:4px;color:#0f1111;">${info.title || info.shortName}</div>
-          <div style="color:#64748b;font-size:10px;margin-bottom:2px;">Bestell-Nr: <b>${info.id}</b></div>
+          <div style="color:#64748b;font-size:10px;margin-bottom:2px;">Bestell-Nr: <b>${info.id}</b> | Menge: <b>${info.quantity || 1} Stück</b></div>
           <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;">
             <span style="color:#475569;">📅 ${info.rawDate || info.date}</span>
             <span style="font-weight:700;color:${info.price === 'Storniert' ? '#c62828' : '#047857'};">${info.price}</span>
           </div>
-          <div style="margin-top:6px;font-size:10px;color:#0284c7;">💡 Klick öffnet Bestelldetails in neuem Tab</div>
+          <div style="margin-top:6px;font-size:10px;color:#0284c7;">💡 Klick auf Artikelname öffnet Details im neuen Tab</div>
         </div>
       </div>
     `;
@@ -329,7 +348,31 @@ export class UniversalDashboard {
     if (!this.tbody) return;
     this.tbody.innerHTML = "";
 
-    const sorted = Array.from(this.ordersMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+    const sorted = Array.from(this.ordersMap.values()).sort((a, b) => {
+      let cmp = 0;
+      if (this.sortColumn === "date") {
+        cmp = (a.date || "").localeCompare(b.date || "");
+      } else if (this.sortColumn === "title") {
+        cmp = (a.shortName || a.title || "").localeCompare(b.shortName || b.title || "");
+      } else if (this.sortColumn === "quantity") {
+        cmp = (a.quantity || 1) - (b.quantity || 1);
+      } else if (this.sortColumn === "price") {
+        cmp = parseNumericPrice(a.price) - parseNumericPrice(b.price);
+      }
+      return this.sortDirection === "asc" ? cmp : -cmp;
+    });
+
+    // Pfeile im Header aktualisieren
+    ["date", "title", "quantity", "price"].forEach(col => {
+      const el = this.panel.querySelector(`#uid-sort-${col}`);
+      if (el) {
+        if (this.sortColumn === col) {
+          el.textContent = this.sortDirection === "asc" ? " ▲" : " ▼";
+        } else {
+          el.textContent = "";
+        }
+      }
+    });
 
     sorted.forEach((info) => {
       const tr = document.createElement("tr");
@@ -341,17 +384,13 @@ export class UniversalDashboard {
       tr.onmouseenter = (e) => this.showQuickinfo(e, info);
       tr.onmouseleave = () => this.hideQuickinfo();
 
-      // Klickverhalten: Scrollen wenn auf Live-Page, sonst neuen Tab mit Bestelldetails öffnen!
+      // Klickverhalten: Scrollen wenn auf Live-Page (KEIN ungewolltes Öffnen von neuen Tabs beim Zeilenklick!)
       tr.onclick = (e) => {
-        if (e.target.tagName === "INPUT") return;
+        if (e.target.tagName === "INPUT" || e.target.tagName === "A" || e.target.closest("a")) return;
         if (info.cardElement && document.body.contains(info.cardElement)) {
           info.cardElement.scrollIntoView({ behavior: "smooth", block: "center" });
           info.cardElement.style.outline = "2px solid #ff9900";
           setTimeout(() => (info.cardElement.style.outline = "none"), 2000);
-        } else {
-          // Neues Tab öffnen mit der echten Amazon-Detailseite
-          const detailsUrl = `https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}`;
-          window.open(detailsUrl, "_blank");
         }
       };
 
@@ -364,11 +403,12 @@ export class UniversalDashboard {
           <input type="checkbox" class="uid-table-cb" data-oid="${info.id}" ${this.selectedOrders.has(info.id) ? "checked" : ""} style="cursor:pointer;">
         </td>
         <td style="padding:4px;white-space:nowrap;color:#64748b;">${dDisplay}</td>
-        <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;" title="${info.title}">
-          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;" onclick="event.stopPropagation();">
+        <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="${info.title}">
+          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
             ${info.shortName}
           </a>
         </td>
+        <td style="padding:4px;text-align:center;color:#475569;font-weight:600;">${info.quantity || 1}</td>
         <td style="padding:4px;text-align:right;white-space:nowrap;${priceStyle}">${info.price}</td>
       `;
 

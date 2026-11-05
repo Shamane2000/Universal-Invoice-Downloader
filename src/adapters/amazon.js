@@ -178,6 +178,24 @@ export class AmazonAdapter {
 
       const shortName = sanitizeTitle(title);
 
+      // Menge (Anzahl der Artikel in der Bestellung)
+      const itemBlocks = card.querySelectorAll(".yohtmlc-item, [class*='yohtmlc-item'], .shipment");
+      let totalQty = 0;
+      if (itemBlocks.length > 0) {
+        itemBlocks.forEach(ib => {
+          const qm = (ib.textContent || "").match(/(?:menge|qty|stk|stück)[:\s]+(\d+)/i);
+          if (qm) {
+            totalQty += parseInt(qm[1], 10);
+          } else {
+            totalQty += 1;
+          }
+        });
+      }
+      if (totalQty === 0) {
+        const qm = cleanCardText.match(/(?:menge|qty|stk|stück)[:\s]+(\d+)/i);
+        totalQty = qm ? parseInt(qm[1], 10) : 1;
+      }
+
       // Preis ermitteln
       let price = "";
       if (isCancelled) {
@@ -223,6 +241,7 @@ export class AmazonAdapter {
         rawDate: rawDate,
         title: title,
         shortName: shortName,
+        quantity: totalQty,
         price: price,
         imageUrl: imageUrl,
         popoverUrl: popoverUrl,
@@ -366,24 +385,51 @@ export class AmazonAdapter {
   }
 
   async resolveDownloadInfo(order) {
-    if (!order.popoverUrl) return null;
-    const fullUrl = order.popoverUrl.startsWith("http") ? order.popoverUrl : window.location.origin + order.popoverUrl;
+    if (!order.popoverUrl) {
+      order.popoverUrl = `/your-orders/invoice/popover?orderId=${order.id}`;
+    }
+    let fullUrl = order.popoverUrl.startsWith("http") ? order.popoverUrl : window.location.origin + order.popoverUrl;
+    try {
+      const u = new URL(fullUrl);
+      u.searchParams.set("disableCsd", "no-js");
+      fullUrl = u.toString();
+    } catch (e) {}
 
     const response = await requestHtml(fullUrl);
-    if (!response.ok) return null;
+    if (!response.ok) {
+      // Fallback direkt zur Amazon-Bestellübersicht
+      const summaryUrl = `https://www.amazon.de/gp/css/summary/print.html?orderID=${order.id}`;
+      return {
+        url: summaryUrl,
+        filename: `${order.date}-${order.id}-${order.shortName}.html`,
+        subfolder: "invoices/amazon"
+      };
+    }
 
     const doc = new DOMParser().parseFromString(response.text, "text/html");
-    const pdfLink = doc.querySelector("a[href*='/documents/download/'], a[href*='invoice.pdf']");
+    const allLinks = Array.from(doc.querySelectorAll("a[href]"));
+
     let downloadUrl = "";
 
-    if (pdfLink && pdfLink.getAttribute("href")) {
+    // 1. Primär: Echter PDF-Rechnungsdownload
+    const pdfLink = allLinks.find(a => {
+      const h = (a.getAttribute("href") || "").toLowerCase();
+      const t = (a.textContent || "").toLowerCase();
+      return h.includes("/documents/download/") || h.includes("invoice.pdf") || (h.includes("invoice") && !h.includes("popover")) || t.includes("rechnung") || t.includes("invoice");
+    });
+
+    if (pdfLink) {
       const h = pdfLink.getAttribute("href");
       downloadUrl = h.startsWith("http") ? h : window.location.origin + h;
     } else {
-      const summaryLink = doc.querySelector("a[href*='summary/print.html']");
-      if (summaryLink && summaryLink.getAttribute("href")) {
+      // 2. Sekundär: Offizielle Amazon-Druckübersicht (Bestellübersicht)
+      const summaryLink = allLinks.find(a => (a.getAttribute("href") || "").includes("print.html"));
+      if (summaryLink) {
         const h = summaryLink.getAttribute("href");
         downloadUrl = h.startsWith("http") ? h : window.location.origin + h;
+      } else {
+        // 3. Fallback: Direkte Druckübersichts-URL von Amazon
+        downloadUrl = `https://www.amazon.de/gp/css/summary/print.html?orderID=${order.id}`;
       }
     }
 

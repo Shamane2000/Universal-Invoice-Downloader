@@ -6,7 +6,7 @@ import { sleep } from "./utils.js";
 
 export class BatchDownloader {
   constructor(options = {}) {
-    this.delayMs = options.delayMs || 1600;
+    this.delayMs = typeof options === "number" ? options : (options.delayMs || 1800);
     this.isRunning = false;
     this.isCancelled = false;
   }
@@ -16,37 +16,80 @@ export class BatchDownloader {
     this.isRunning = false;
   }
 
+  downloadBlob(blob, filename) {
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+  }
+
   async downloadFile(downloadUrl, targetFilename, subfolder = "invoices") {
     if (!downloadUrl) throw new Error("Keine Download-URL übergeben.");
 
     const fullPath = subfolder ? `${subfolder}/${targetFilename}` : targetFilename;
 
+    // 1. Primär: GM_download
     if (typeof GM_download === "function") {
-      return new Promise((resolve, reject) => {
-        GM_download({
-          url: downloadUrl,
-          name: fullPath,
-          saveAs: false,
-          onload: () => resolve(true),
-          onerror: (err) => reject(new Error(err ? (err.error || "Download Error") : "GM_download fehlgeschlagen")),
-          ontimeout: () => reject(new Error("Timeout beim Download"))
+      try {
+        const ok = await new Promise((resolve) => {
+          GM_download({
+            url: downloadUrl,
+            name: fullPath,
+            saveAs: false,
+            onload: () => resolve(true),
+            onerror: () => resolve(false),
+            ontimeout: () => resolve(false)
+          });
         });
-      });
-    } else {
-      // Fallback via Blob & dynamischem <a> Tag
-      const res = await fetch(downloadUrl, { credentials: "include" });
-      if (!res.ok) throw new Error(`HTTP ${res.status} beim Download`);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = targetFilename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-      return true;
+        if (ok) return true;
+      } catch (e) {}
     }
+
+    // 2. Fallback: GM_xmlhttpRequest mit responseType "blob"
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        const blob = await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: downloadUrl,
+            responseType: "blob",
+            onload: (res) => {
+              if (res.response && res.response instanceof Blob) {
+                resolve(res.response);
+              } else {
+                reject(new Error("Kein Blob empfangen"));
+              }
+            },
+            onerror: reject,
+            ontimeout: reject
+          });
+        });
+        this.downloadBlob(blob, targetFilename);
+        return true;
+      } catch (e) {}
+    }
+
+    // 3. Fallback: fetch mit Blob
+    try {
+      const res = await fetch(downloadUrl, { credentials: "include" });
+      if (res.ok) {
+        const blob = await res.blob();
+        this.downloadBlob(blob, targetFilename);
+        return true;
+      }
+    } catch (e) {}
+
+    // 4. Letzter Notnagel: Neuer Tab
+    window.open(downloadUrl, "_blank");
+    return true;
+  }
+
+  run(items, resolveUrlFn, callbacks = {}) {
+    return this.runBatch(items, resolveUrlFn, callbacks);
   }
 
   async runBatch(items, resolveUrlFn, callbacks = {}) {

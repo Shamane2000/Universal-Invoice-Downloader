@@ -78,6 +78,20 @@ function parseGermanDate(text) {
   return "20260101";
 }
 
+function parseNumericPrice(str) {
+  if (!str || /storniert|cancelled/i.test(str)) return 0;
+  const m = str.match(/[\d.,]+/);
+  if (!m) return 0;
+  const val = m[0];
+  if (val.includes(",") && val.includes(".")) {
+    return parseFloat(val.replace(/\./g, "").replace(",", ".")) || 0;
+  }
+  if (val.includes(",")) {
+    return parseFloat(val.replace(",", ".")) || 0;
+  }
+  return parseFloat(val) || 0;
+}
+
 function requestHtml(url, options = {}) {
   return new Promise((resolve, reject) => {
     if (typeof GM_xmlhttpRequest === "function") {
@@ -128,7 +142,7 @@ function requestHtml(url, options = {}) {
 
 class BatchDownloader {
   constructor(options = {}) {
-    this.delayMs = options.delayMs || 1600;
+    this.delayMs = typeof options === "number" ? options : (options.delayMs || 1800);
     this.isRunning = false;
     this.isCancelled = false;
   }
@@ -138,37 +152,80 @@ class BatchDownloader {
     this.isRunning = false;
   }
 
+  downloadBlob(blob, filename) {
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+  }
+
   async downloadFile(downloadUrl, targetFilename, subfolder = "invoices") {
     if (!downloadUrl) throw new Error("Keine Download-URL übergeben.");
 
     const fullPath = subfolder ? `${subfolder}/${targetFilename}` : targetFilename;
 
+    // 1. Primär: GM_download
     if (typeof GM_download === "function") {
-      return new Promise((resolve, reject) => {
-        GM_download({
-          url: downloadUrl,
-          name: fullPath,
-          saveAs: false,
-          onload: () => resolve(true),
-          onerror: (err) => reject(new Error(err ? (err.error || "Download Error") : "GM_download fehlgeschlagen")),
-          ontimeout: () => reject(new Error("Timeout beim Download"))
+      try {
+        const ok = await new Promise((resolve) => {
+          GM_download({
+            url: downloadUrl,
+            name: fullPath,
+            saveAs: false,
+            onload: () => resolve(true),
+            onerror: () => resolve(false),
+            ontimeout: () => resolve(false)
+          });
         });
-      });
-    } else {
-      // Fallback via Blob & dynamischem <a> Tag
-      const res = await fetch(downloadUrl, { credentials: "include" });
-      if (!res.ok) throw new Error(`HTTP ${res.status} beim Download`);
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = targetFilename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-      return true;
+        if (ok) return true;
+      } catch (e) {}
     }
+
+    // 2. Fallback: GM_xmlhttpRequest mit responseType "blob"
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        const blob = await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: downloadUrl,
+            responseType: "blob",
+            onload: (res) => {
+              if (res.response && res.response instanceof Blob) {
+                resolve(res.response);
+              } else {
+                reject(new Error("Kein Blob empfangen"));
+              }
+            },
+            onerror: reject,
+            ontimeout: reject
+          });
+        });
+        this.downloadBlob(blob, targetFilename);
+        return true;
+      } catch (e) {}
+    }
+
+    // 3. Fallback: fetch mit Blob
+    try {
+      const res = await fetch(downloadUrl, { credentials: "include" });
+      if (res.ok) {
+        const blob = await res.blob();
+        this.downloadBlob(blob, targetFilename);
+        return true;
+      }
+    } catch (e) {}
+
+    // 4. Letzter Notnagel: Neuer Tab
+    window.open(downloadUrl, "_blank");
+    return true;
+  }
+
+  run(items, resolveUrlFn, callbacks = {}) {
+    return this.runBatch(items, resolveUrlFn, callbacks);
   }
 
   async runBatch(items, resolveUrlFn, callbacks = {}) {
@@ -211,6 +268,8 @@ class BatchDownloader {
  * Core UI: Universal Floating Dashboard, Table, Live Search, Hover-Quickinfo & Progress Bar
  */
 
+
+
 class UniversalDashboard {
   constructor(options = {}) {
     this.shopName = options.shopName || "Universal";
@@ -219,6 +278,8 @@ class UniversalDashboard {
     this.selectedOrders = new Set();
     this.isMinimized = false;
     this.isCompacted = false;
+    this.sortColumn = "date";
+    this.sortDirection = "desc";
     this.callbacks = options.callbacks || {};
 
     this.panel = null;
@@ -295,9 +356,10 @@ class UniversalDashboard {
             <thead style="background:#f1f5f9; position:sticky; top:0; z-index:10; border-bottom:1px solid #cbd5e1;">
               <tr>
                 <th style="padding:5px; width:24px; text-align:center;"><input type="checkbox" id="uid-th-cb" style="cursor:pointer;"></th>
-                <th style="padding:5px; width:75px;">Datum</th>
-                <th style="padding:5px;">Artikel</th>
-                <th style="padding:5px; width:65px; text-align:right;">Betrag</th>
+                <th class="uid-th-sort" data-sort="date" style="padding:5px; width:75px; cursor:pointer; user-select:none;" title="Klick: Nach Datum sortieren">Datum <span id="uid-sort-date" style="color:#ff9900;">▼</span></th>
+                <th class="uid-th-sort" data-sort="title" style="padding:5px; cursor:pointer; user-select:none;" title="Klick: Nach Artikel sortieren">Artikel <span id="uid-sort-title" style="color:#ff9900;"></span></th>
+                <th class="uid-th-sort" data-sort="quantity" style="padding:5px; width:45px; text-align:center; cursor:pointer; user-select:none;" title="Klick: Nach Menge sortieren">Stk. <span id="uid-sort-quantity" style="color:#ff9900;"></span></th>
+                <th class="uid-th-sort" data-sort="price" style="padding:5px; width:65px; text-align:right; cursor:pointer; user-select:none;" title="Klick: Nach Betrag sortieren">Betrag <span id="uid-sort-price" style="color:#ff9900;"></span></th>
               </tr>
             </thead>
             <tbody id="uid-tbody"></tbody>
@@ -455,6 +517,20 @@ class UniversalDashboard {
     this.panel.querySelector("#uid-test-btn").onclick = () => {
       if (this.callbacks.onDownloadTest) this.callbacks.onDownloadTest();
     };
+
+    // Sortierung per Klick auf Tabellen-Spaltentitel
+    this.panel.querySelectorAll(".uid-th-sort").forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.sort;
+        if (this.sortColumn === col) {
+          this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
+        } else {
+          this.sortColumn = col;
+          this.sortDirection = (col === "title") ? "asc" : "desc";
+        }
+        this.renderTable();
+      };
+    });
   }
 
   addOrders(orderList) {
@@ -505,12 +581,12 @@ class UniversalDashboard {
         ${thumbHtml}
         <div style="flex:1;overflow:hidden;">
           <div style="font-weight:700;font-size:12px;line-height:1.3;margin-bottom:4px;color:#0f1111;">${info.title || info.shortName}</div>
-          <div style="color:#64748b;font-size:10px;margin-bottom:2px;">Bestell-Nr: <b>${info.id}</b></div>
+          <div style="color:#64748b;font-size:10px;margin-bottom:2px;">Bestell-Nr: <b>${info.id}</b> | Menge: <b>${info.quantity || 1} Stück</b></div>
           <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;">
             <span style="color:#475569;">📅 ${info.rawDate || info.date}</span>
             <span style="font-weight:700;color:${info.price === 'Storniert' ? '#c62828' : '#047857'};">${info.price}</span>
           </div>
-          <div style="margin-top:6px;font-size:10px;color:#0284c7;">💡 Klick öffnet Bestelldetails in neuem Tab</div>
+          <div style="margin-top:6px;font-size:10px;color:#0284c7;">💡 Klick auf Artikelname öffnet Details im neuen Tab</div>
         </div>
       </div>
     `;
@@ -538,7 +614,31 @@ class UniversalDashboard {
     if (!this.tbody) return;
     this.tbody.innerHTML = "";
 
-    const sorted = Array.from(this.ordersMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+    const sorted = Array.from(this.ordersMap.values()).sort((a, b) => {
+      let cmp = 0;
+      if (this.sortColumn === "date") {
+        cmp = (a.date || "").localeCompare(b.date || "");
+      } else if (this.sortColumn === "title") {
+        cmp = (a.shortName || a.title || "").localeCompare(b.shortName || b.title || "");
+      } else if (this.sortColumn === "quantity") {
+        cmp = (a.quantity || 1) - (b.quantity || 1);
+      } else if (this.sortColumn === "price") {
+        cmp = parseNumericPrice(a.price) - parseNumericPrice(b.price);
+      }
+      return this.sortDirection === "asc" ? cmp : -cmp;
+    });
+
+    // Pfeile im Header aktualisieren
+    ["date", "title", "quantity", "price"].forEach(col => {
+      const el = this.panel.querySelector(`#uid-sort-${col}`);
+      if (el) {
+        if (this.sortColumn === col) {
+          el.textContent = this.sortDirection === "asc" ? " ▲" : " ▼";
+        } else {
+          el.textContent = "";
+        }
+      }
+    });
 
     sorted.forEach((info) => {
       const tr = document.createElement("tr");
@@ -550,17 +650,13 @@ class UniversalDashboard {
       tr.onmouseenter = (e) => this.showQuickinfo(e, info);
       tr.onmouseleave = () => this.hideQuickinfo();
 
-      // Klickverhalten: Scrollen wenn auf Live-Page, sonst neuen Tab mit Bestelldetails öffnen!
+      // Klickverhalten: Scrollen wenn auf Live-Page (KEIN ungewolltes Öffnen von neuen Tabs beim Zeilenklick!)
       tr.onclick = (e) => {
-        if (e.target.tagName === "INPUT") return;
+        if (e.target.tagName === "INPUT" || e.target.tagName === "A" || e.target.closest("a")) return;
         if (info.cardElement && document.body.contains(info.cardElement)) {
           info.cardElement.scrollIntoView({ behavior: "smooth", block: "center" });
           info.cardElement.style.outline = "2px solid #ff9900";
           setTimeout(() => (info.cardElement.style.outline = "none"), 2000);
-        } else {
-          // Neues Tab öffnen mit der echten Amazon-Detailseite
-          const detailsUrl = `https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}`;
-          window.open(detailsUrl, "_blank");
         }
       };
 
@@ -573,11 +669,12 @@ class UniversalDashboard {
           <input type="checkbox" class="uid-table-cb" data-oid="${info.id}" ${this.selectedOrders.has(info.id) ? "checked" : ""} style="cursor:pointer;">
         </td>
         <td style="padding:4px;white-space:nowrap;color:#64748b;">${dDisplay}</td>
-        <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;" title="${info.title}">
-          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;" onclick="event.stopPropagation();">
+        <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="${info.title}">
+          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
             ${info.shortName}
           </a>
         </td>
+        <td style="padding:4px;text-align:center;color:#475569;font-weight:600;">${info.quantity || 1}</td>
         <td style="padding:4px;text-align:right;white-space:nowrap;${priceStyle}">${info.price}</td>
       `;
 
@@ -834,6 +931,24 @@ class AmazonAdapter {
 
       const shortName = sanitizeTitle(title);
 
+      // Menge (Anzahl der Artikel in der Bestellung)
+      const itemBlocks = card.querySelectorAll(".yohtmlc-item, [class*='yohtmlc-item'], .shipment");
+      let totalQty = 0;
+      if (itemBlocks.length > 0) {
+        itemBlocks.forEach(ib => {
+          const qm = (ib.textContent || "").match(/(?:menge|qty|stk|stück)[:\s]+(\d+)/i);
+          if (qm) {
+            totalQty += parseInt(qm[1], 10);
+          } else {
+            totalQty += 1;
+          }
+        });
+      }
+      if (totalQty === 0) {
+        const qm = cleanCardText.match(/(?:menge|qty|stk|stück)[:\s]+(\d+)/i);
+        totalQty = qm ? parseInt(qm[1], 10) : 1;
+      }
+
       // Preis ermitteln
       let price = "";
       if (isCancelled) {
@@ -879,6 +994,7 @@ class AmazonAdapter {
         rawDate: rawDate,
         title: title,
         shortName: shortName,
+        quantity: totalQty,
         price: price,
         imageUrl: imageUrl,
         popoverUrl: popoverUrl,
@@ -1022,24 +1138,51 @@ class AmazonAdapter {
   }
 
   async resolveDownloadInfo(order) {
-    if (!order.popoverUrl) return null;
-    const fullUrl = order.popoverUrl.startsWith("http") ? order.popoverUrl : window.location.origin + order.popoverUrl;
+    if (!order.popoverUrl) {
+      order.popoverUrl = `/your-orders/invoice/popover?orderId=${order.id}`;
+    }
+    let fullUrl = order.popoverUrl.startsWith("http") ? order.popoverUrl : window.location.origin + order.popoverUrl;
+    try {
+      const u = new URL(fullUrl);
+      u.searchParams.set("disableCsd", "no-js");
+      fullUrl = u.toString();
+    } catch (e) {}
 
     const response = await requestHtml(fullUrl);
-    if (!response.ok) return null;
+    if (!response.ok) {
+      // Fallback direkt zur Amazon-Bestellübersicht
+      const summaryUrl = `https://www.amazon.de/gp/css/summary/print.html?orderID=${order.id}`;
+      return {
+        url: summaryUrl,
+        filename: `${order.date}-${order.id}-${order.shortName}.html`,
+        subfolder: "invoices/amazon"
+      };
+    }
 
     const doc = new DOMParser().parseFromString(response.text, "text/html");
-    const pdfLink = doc.querySelector("a[href*='/documents/download/'], a[href*='invoice.pdf']");
+    const allLinks = Array.from(doc.querySelectorAll("a[href]"));
+
     let downloadUrl = "";
 
-    if (pdfLink && pdfLink.getAttribute("href")) {
+    // 1. Primär: Echter PDF-Rechnungsdownload
+    const pdfLink = allLinks.find(a => {
+      const h = (a.getAttribute("href") || "").toLowerCase();
+      const t = (a.textContent || "").toLowerCase();
+      return h.includes("/documents/download/") || h.includes("invoice.pdf") || (h.includes("invoice") && !h.includes("popover")) || t.includes("rechnung") || t.includes("invoice");
+    });
+
+    if (pdfLink) {
       const h = pdfLink.getAttribute("href");
       downloadUrl = h.startsWith("http") ? h : window.location.origin + h;
     } else {
-      const summaryLink = doc.querySelector("a[href*='summary/print.html']");
-      if (summaryLink && summaryLink.getAttribute("href")) {
+      // 2. Sekundär: Offizielle Amazon-Druckübersicht (Bestellübersicht)
+      const summaryLink = allLinks.find(a => (a.getAttribute("href") || "").includes("print.html"));
+      if (summaryLink) {
         const h = summaryLink.getAttribute("href");
         downloadUrl = h.startsWith("http") ? h : window.location.origin + h;
+      } else {
+        // 3. Fallback: Direkte Druckübersichts-URL von Amazon
+        downloadUrl = `https://www.amazon.de/gp/css/summary/print.html?orderID=${order.id}`;
       }
     }
 
@@ -1097,14 +1240,16 @@ class AmazonAdapter {
       },
       onDownloadTest: async () => {
         if (ui.ordersMap.size === 0 || !adapter) return;
-        const firstOrder = Array.from(ui.ordersMap.values())[0];
-        ui.setStatus(`🧪 Test-Download für <b>${firstOrder.id}</b>...`);
-        const info = await adapter.resolveDownloadInfo(firstOrder);
+        const testOrder = Array.from(ui.selectedOrders.values()).map(id => ui.ordersMap.get(id)).find(o => o && o.price !== "Storniert") ||
+                          Array.from(ui.ordersMap.values()).find(o => o && o.price !== "Storniert") ||
+                          Array.from(ui.ordersMap.values())[0];
+        ui.setStatus(`🧪 Test-Download für <b>${testOrder.id}</b> (${testOrder.shortName})...`);
+        const info = await adapter.resolveDownloadInfo(testOrder);
         if (info && info.url) {
           await downloader.downloadFile(info.url, info.filename, info.subfolder);
           ui.setStatus(`✅ Test-PDF heruntergeladen: <b>${info.filename}</b>`);
         } else {
-          ui.setStatus(`⚠️ Rechnungs-URL für ${firstOrder.id} nicht verfügbar.`);
+          ui.setStatus(`⚠️ Rechnungs-URL für ${testOrder.id} nicht verfügbar.`);
         }
       }
     }

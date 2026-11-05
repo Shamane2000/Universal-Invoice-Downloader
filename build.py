@@ -90,14 +90,16 @@ def build_amazon():
       },
       onDownloadTest: async () => {
         if (ui.ordersMap.size === 0 || !adapter) return;
-        const firstOrder = Array.from(ui.ordersMap.values())[0];
-        ui.setStatus(`🧪 Test-Download für <b>${firstOrder.id}</b>...`);
-        const info = await adapter.resolveDownloadInfo(firstOrder);
+        const testOrder = Array.from(ui.selectedOrders.values()).map(id => ui.ordersMap.get(id)).find(o => o && o.price !== "Storniert") ||
+                          Array.from(ui.ordersMap.values()).find(o => o && o.price !== "Storniert") ||
+                          Array.from(ui.ordersMap.values())[0];
+        ui.setStatus(`🧪 Test-Download für <b>${testOrder.id}</b> (${testOrder.shortName})...`);
+        const info = await adapter.resolveDownloadInfo(testOrder);
         if (info && info.url) {
           await downloader.downloadFile(info.url, info.filename, info.subfolder);
           ui.setStatus(`✅ Test-PDF heruntergeladen: <b>${info.filename}</b>`);
         } else {
-          ui.setStatus(`⚠️ Rechnungs-URL für ${firstOrder.id} nicht verfügbar.`);
+          ui.setStatus(`⚠️ Rechnungs-URL für ${testOrder.id} nicht verfügbar.`);
         }
       }
     }

@@ -61,6 +61,20 @@ export function parseGermanDate(text) {
   return "20260101";
 }
 
+export function parseNumericPrice(str) {
+  if (!str || /storniert|cancelled/i.test(str)) return 0;
+  const m = str.match(/[\d.,]+/);
+  if (!m) return 0;
+  const val = m[0];
+  if (val.includes(",") && val.includes(".")) {
+    return parseFloat(val.replace(/\./g, "").replace(",", ".")) || 0;
+  }
+  if (val.includes(",")) {
+    return parseFloat(val.replace(",", ".")) || 0;
+  }
+  return parseFloat(val) || 0;
+}
+
 export function requestHtml(url, options = {}) {
   return new Promise((resolve, reject) => {
     if (typeof GM_xmlhttpRequest === "function") {
