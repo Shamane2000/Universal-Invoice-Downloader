@@ -265,15 +265,33 @@ export class AmazonAdapter {
       return;
     }
 
-    const pageLinks = Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected) a"))
+    const visitedUrls = new Set();
+    const queue = [];
+
+    // Initiale Seiten aus der Paginierung der Live-Seite
+    Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected) a"))
       .map(a => ({
         num: parseInt((a.textContent || "").trim(), 10),
         href: a.getAttribute("href")
       }))
-      .filter(x => !isNaN(x.num) && x.href)
-      .sort((a, b) => a.num - b.num);
+      .filter(x => x.href)
+      .sort((a, b) => (a.num || 999) - (b.num || 999))
+      .forEach(item => {
+        let full = item.href.startsWith("http") ? item.href : window.location.origin + item.href;
+        try {
+          const u = new URL(full);
+          u.searchParams.set("disableCsd", "no-js");
+          full = u.toString();
+        } catch (e) {
+          full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
+        }
+        if (!visitedUrls.has(full)) {
+          visitedUrls.add(full);
+          queue.push({ num: item.num, url: full });
+        }
+      });
 
-    if (pageLinks.length === 0) {
+    if (queue.length === 0) {
       this.ui.setStatus("ℹ️ Keine weiteren Seiten auf dieser Ansicht vorhanden.");
       return;
     }
@@ -285,22 +303,42 @@ export class AmazonAdapter {
       loadBtn.style.borderColor = "#ef5350";
     }
 
-    for (let i = 0; i < pageLinks.length; i++) {
-      if (!this.isLoadingPages) break;
+    let currentIndex = 0;
+    while (currentIndex < queue.length && this.isLoadingPages) {
+      const p = queue[currentIndex];
+      currentIndex++;
 
-      const p = pageLinks[i];
-      const fullUrl = p.href.startsWith("http") ? p.href : window.location.origin + p.href;
-      this.ui.setStatus(`⏳ Lade Seite ${p.num} von ${pageLinks[pageLinks.length - 1].num} (${this.ui.ordersMap.size} Bestellungen bisher)...`);
+      this.ui.setStatus(`⏳ Lade Seite ${p.num || currentIndex + 1} (${this.ui.ordersMap.size} Bestellungen bisher)...`);
 
       try {
-        const response = await requestHtml(fullUrl);
+        const response = await requestHtml(p.url);
         const html = response.text || "";
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         this.collectOrders(doc, false);
+
+        // Weitere Seiten aus dem geladenen HTML entdecken
+        Array.from(doc.querySelectorAll(".a-pagination li:not(.a-selected) a, li.a-last a")).forEach(a => {
+          const href = a.getAttribute("href");
+          if (!href) return;
+          let nextUrl = href.startsWith("http") ? href : window.location.origin + href;
+          try {
+            const u = new URL(nextUrl);
+            u.searchParams.set("disableCsd", "no-js");
+            nextUrl = u.toString();
+          } catch (e) {
+            nextUrl += (nextUrl.includes("?") ? "&" : "?") + "disableCsd=no-js";
+          }
+          if (!visitedUrls.has(nextUrl)) {
+            visitedUrls.add(nextUrl);
+            const num = parseInt((a.textContent || "").trim(), 10);
+            queue.push({ num: num || (queue.length + 2), url: nextUrl });
+          }
+        });
+
         await sleep(1400);
       } catch (err) {
-        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num}: ${err.message}`);
+        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num || currentIndex}: ${err.message}`);
         break;
       }
     }

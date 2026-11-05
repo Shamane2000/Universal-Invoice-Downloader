@@ -62,8 +62,15 @@ function parseGermanDate(text) {
   const m = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
   if (m) {
     const day = m[1].padStart(2, "0");
-    const mon = MONTH_MAP_DE[m[2].toLowerCase()] || "01";
+    const mon = MONTH_MAP_DE[m[2].toLowerCase()] || MONTH_MAP_EN[m[2].toLowerCase()] || "01";
     const year = m[3];
+    return `${year}${mon}${day}`;
+  }
+  const mEn = cleaned.match(/([a-zA-Z]{3,12})\s*(\d{1,2}),?\s*(\d{4})/);
+  if (mEn) {
+    const mon = MONTH_MAP_EN[mEn[1].toLowerCase()] || MONTH_MAP_DE[mEn[1].toLowerCase()] || "01";
+    const day = mEn[2].padStart(2, "0");
+    const year = mEn[3];
     return `${year}${mon}${day}`;
   }
   const isoMatch = cleaned.match(/(\d{4})[-/.](\d{2})[-/.](\d{2})/);
@@ -386,10 +393,20 @@ class UniversalDashboard {
     };
 
     this.panel.querySelector("#uid-copy-debug").onclick = () => {
+      const allOrders = Array.from(this.ordersMap.values());
+      const sample = [];
+      if (allOrders.length > 0) sample.push(allOrders[0]);
+      if (allOrders.length > 1) sample.push(allOrders[1]);
+      if (allOrders.length > 12) sample.push(allOrders[12]);
+      if (allOrders.length > 25) sample.push(allOrders[25]);
+      if (allOrders.length > 3 && !sample.includes(allOrders[allOrders.length - 1])) {
+        sample.push(allOrders[allOrders.length - 1]);
+      }
+
       const debug = {
         orderCount: this.ordersMap.size,
         selectedCount: this.selectedOrders.size,
-        ordersSample: Array.from(this.ordersMap.values()).slice(0, 5)
+        ordersSample: sample
       };
       const str = JSON.stringify(debug, null, 2);
       if (typeof GM_setClipboard === "function") GM_setClipboard(str);
@@ -442,16 +459,41 @@ class UniversalDashboard {
 
   addOrders(orderList) {
     let addedCount = 0;
+    let updatedCount = 0;
+
     orderList.forEach((order) => {
       if (!this.ordersMap.has(order.id)) {
         this.ordersMap.set(order.id, order);
         addedCount++;
+      } else {
+        const existing = this.ordersMap.get(order.id);
+        let changed = false;
+        if ((!existing.title || existing.title.startsWith("Amazon_Bestellung_")) && order.title && !order.title.startsWith("Amazon_Bestellung_")) {
+          existing.title = order.title;
+          existing.shortName = order.shortName;
+          changed = true;
+        }
+        if (!existing.imageUrl && order.imageUrl) {
+          existing.imageUrl = order.imageUrl;
+          changed = true;
+        }
+        if ((!existing.price || existing.price === "-") && order.price && order.price !== "-") {
+          existing.price = order.price;
+          changed = true;
+        }
+        if ((!existing.date || existing.date === "20260101") && order.date && order.date !== "20260101") {
+          existing.date = order.date;
+          existing.rawDate = order.rawDate;
+          changed = true;
+        }
+        if (changed) updatedCount++;
       }
     });
-    if (addedCount > 0) {
+
+    if (addedCount > 0 || updatedCount > 0) {
       this.renderTable();
     }
-    return addedCount;
+    return addedCount + updatedCount;
   }
 
   showQuickinfo(e, info) {
@@ -879,15 +921,33 @@ class AmazonAdapter {
       return;
     }
 
-    const pageLinks = Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected) a"))
+    const visitedUrls = new Set();
+    const queue = [];
+
+    // Initiale Seiten aus der Paginierung der Live-Seite
+    Array.from(document.querySelectorAll(".a-pagination li:not(.a-selected) a"))
       .map(a => ({
         num: parseInt((a.textContent || "").trim(), 10),
         href: a.getAttribute("href")
       }))
-      .filter(x => !isNaN(x.num) && x.href)
-      .sort((a, b) => a.num - b.num);
+      .filter(x => x.href)
+      .sort((a, b) => (a.num || 999) - (b.num || 999))
+      .forEach(item => {
+        let full = item.href.startsWith("http") ? item.href : window.location.origin + item.href;
+        try {
+          const u = new URL(full);
+          u.searchParams.set("disableCsd", "no-js");
+          full = u.toString();
+        } catch (e) {
+          full += (full.includes("?") ? "&" : "?") + "disableCsd=no-js";
+        }
+        if (!visitedUrls.has(full)) {
+          visitedUrls.add(full);
+          queue.push({ num: item.num, url: full });
+        }
+      });
 
-    if (pageLinks.length === 0) {
+    if (queue.length === 0) {
       this.ui.setStatus("ℹ️ Keine weiteren Seiten auf dieser Ansicht vorhanden.");
       return;
     }
@@ -899,22 +959,42 @@ class AmazonAdapter {
       loadBtn.style.borderColor = "#ef5350";
     }
 
-    for (let i = 0; i < pageLinks.length; i++) {
-      if (!this.isLoadingPages) break;
+    let currentIndex = 0;
+    while (currentIndex < queue.length && this.isLoadingPages) {
+      const p = queue[currentIndex];
+      currentIndex++;
 
-      const p = pageLinks[i];
-      const fullUrl = p.href.startsWith("http") ? p.href : window.location.origin + p.href;
-      this.ui.setStatus(`⏳ Lade Seite ${p.num} von ${pageLinks[pageLinks.length - 1].num} (${this.ui.ordersMap.size} Bestellungen bisher)...`);
+      this.ui.setStatus(`⏳ Lade Seite ${p.num || currentIndex + 1} (${this.ui.ordersMap.size} Bestellungen bisher)...`);
 
       try {
-        const response = await requestHtml(fullUrl);
+        const response = await requestHtml(p.url);
         const html = response.text || "";
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         this.collectOrders(doc, false);
+
+        // Weitere Seiten aus dem geladenen HTML entdecken
+        Array.from(doc.querySelectorAll(".a-pagination li:not(.a-selected) a, li.a-last a")).forEach(a => {
+          const href = a.getAttribute("href");
+          if (!href) return;
+          let nextUrl = href.startsWith("http") ? href : window.location.origin + href;
+          try {
+            const u = new URL(nextUrl);
+            u.searchParams.set("disableCsd", "no-js");
+            nextUrl = u.toString();
+          } catch (e) {
+            nextUrl += (nextUrl.includes("?") ? "&" : "?") + "disableCsd=no-js";
+          }
+          if (!visitedUrls.has(nextUrl)) {
+            visitedUrls.add(nextUrl);
+            const num = parseInt((a.textContent || "").trim(), 10);
+            queue.push({ num: num || (queue.length + 2), url: nextUrl });
+          }
+        });
+
         await sleep(1400);
       } catch (err) {
-        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num}: ${err.message}`);
+        this.ui.setStatus(`⚠️ Fehler bei Seite ${p.num || currentIndex}: ${err.message}`);
         break;
       }
     }

@@ -45,8 +45,15 @@ export function parseGermanDate(text) {
   const m = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
   if (m) {
     const day = m[1].padStart(2, "0");
-    const mon = MONTH_MAP_DE[m[2].toLowerCase()] || "01";
+    const mon = MONTH_MAP_DE[m[2].toLowerCase()] || MONTH_MAP_EN[m[2].toLowerCase()] || "01";
     const year = m[3];
+    return `${year}${mon}${day}`;
+  }
+  const mEn = cleaned.match(/([a-zA-Z]{3,12})\s*(\d{1,2}),?\s*(\d{4})/);
+  if (mEn) {
+    const mon = MONTH_MAP_EN[mEn[1].toLowerCase()] || MONTH_MAP_DE[mEn[1].toLowerCase()] || "01";
+    const day = mEn[2].padStart(2, "0");
+    const year = mEn[3];
     return `${year}${mon}${day}`;
   }
   const isoMatch = cleaned.match(/(\d{4})[-/.](\d{2})[-/.](\d{2})/);

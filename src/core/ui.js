@@ -184,10 +184,20 @@ export class UniversalDashboard {
     };
 
     this.panel.querySelector("#uid-copy-debug").onclick = () => {
+      const allOrders = Array.from(this.ordersMap.values());
+      const sample = [];
+      if (allOrders.length > 0) sample.push(allOrders[0]);
+      if (allOrders.length > 1) sample.push(allOrders[1]);
+      if (allOrders.length > 12) sample.push(allOrders[12]);
+      if (allOrders.length > 25) sample.push(allOrders[25]);
+      if (allOrders.length > 3 && !sample.includes(allOrders[allOrders.length - 1])) {
+        sample.push(allOrders[allOrders.length - 1]);
+      }
+
       const debug = {
         orderCount: this.ordersMap.size,
         selectedCount: this.selectedOrders.size,
-        ordersSample: Array.from(this.ordersMap.values()).slice(0, 5)
+        ordersSample: sample
       };
       const str = JSON.stringify(debug, null, 2);
       if (typeof GM_setClipboard === "function") GM_setClipboard(str);
@@ -240,16 +250,41 @@ export class UniversalDashboard {
 
   addOrders(orderList) {
     let addedCount = 0;
+    let updatedCount = 0;
+
     orderList.forEach((order) => {
       if (!this.ordersMap.has(order.id)) {
         this.ordersMap.set(order.id, order);
         addedCount++;
+      } else {
+        const existing = this.ordersMap.get(order.id);
+        let changed = false;
+        if ((!existing.title || existing.title.startsWith("Amazon_Bestellung_")) && order.title && !order.title.startsWith("Amazon_Bestellung_")) {
+          existing.title = order.title;
+          existing.shortName = order.shortName;
+          changed = true;
+        }
+        if (!existing.imageUrl && order.imageUrl) {
+          existing.imageUrl = order.imageUrl;
+          changed = true;
+        }
+        if ((!existing.price || existing.price === "-") && order.price && order.price !== "-") {
+          existing.price = order.price;
+          changed = true;
+        }
+        if ((!existing.date || existing.date === "20260101") && order.date && order.date !== "20260101") {
+          existing.date = order.date;
+          existing.rawDate = order.rawDate;
+          changed = true;
+        }
+        if (changed) updatedCount++;
       }
     });
-    if (addedCount > 0) {
+
+    if (addedCount > 0 || updatedCount > 0) {
       this.renderTable();
     }
-    return addedCount;
+    return addedCount + updatedCount;
   }
 
   showQuickinfo(e, info) {
