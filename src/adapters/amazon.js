@@ -243,6 +243,8 @@ export class AmazonAdapter {
         shortName: shortName,
         quantity: totalQty,
         price: price,
+        isCancelled: isCancelled,
+        isRefunded: isRefunded,
         imageUrl: imageUrl,
         popoverUrl: popoverUrl,
         cardElement: isLivePage ? card : null
@@ -373,8 +375,7 @@ export class AmazonAdapter {
       const p = queue[currentIndex];
       currentIndex++;
 
-      const pct = Math.round((currentIndex / totalToLoad) * 100);
-      this.ui.setProgress(pct);
+      this.ui.setProgress(currentIndex, totalToLoad);
       this.ui.setStatus(`⏳ Lade Seite ${p.num} von ${Math.ceil((totalOrders || queue.length * 10) / 10)} (${this.ui.ordersMap.size} Bestellungen erfasst)...`);
 
       try {
@@ -392,8 +393,8 @@ export class AmazonAdapter {
     }
 
     this.isLoadingPages = false;
-    this.ui.setProgress(100);
-    setTimeout(() => this.ui.setProgress(-1), 3000);
+    this.ui.setProgress(100, 100);
+    setTimeout(() => this.ui.setProgress(-1, 0), 2500);
 
     if (loadBtn) {
       loadBtn.textContent = "🔄 Alle Seiten nachladen";

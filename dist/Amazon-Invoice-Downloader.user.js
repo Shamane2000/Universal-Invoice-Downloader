@@ -346,9 +346,15 @@ class UniversalDashboard {
           </select>
         </div>
 
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-          <button id="uid-select-all" style="flex:1; margin-right:4px; padding:5px; background:#fff; border:1px solid #d1d5db; border-radius:4px; font-size:11px; cursor:pointer;">☑️ Alle gefilterten</button>
-          <button id="uid-select-none" style="flex:1; margin-left:4px; padding:5px; background:#fff; border:1px solid #d1d5db; border-radius:4px; font-size:11px; cursor:pointer;">◻️ Auswahl leeren</button>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div style="display:flex; gap:4px; flex:1;">
+            <button id="uid-select-all" style="flex:1; padding:5px; background:#fff; border:1px solid #d1d5db; border-radius:4px; font-size:11px; cursor:pointer;">☑️ Alle gefilterten</button>
+            <button id="uid-select-none" style="flex:1; padding:5px; background:#fff; border:1px solid #d1d5db; border-radius:4px; font-size:11px; cursor:pointer;">◻️ Auswahl leeren</button>
+          </div>
+          <label style="margin-left:8px; font-size:11px; color:#475569; display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none;" title="Stornierte und erstattete Bestellungen ohne Rechnung ausblenden">
+            <input type="checkbox" id="uid-hide-cancelled-cb" checked style="cursor:pointer;">
+            <span>Nur gültige</span>
+          </label>
         </div>
 
         <div style="max-height:260px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:12px; background:#fafafa;">
@@ -531,6 +537,11 @@ class UniversalDashboard {
         this.renderTable();
       };
     });
+
+    const hideCb = this.panel.querySelector("#uid-hide-cancelled-cb");
+    if (hideCb) {
+      hideCb.onchange = () => this.applyFilter();
+    }
   }
 
   addOrders(orderList) {
@@ -693,12 +704,19 @@ class UniversalDashboard {
 
   applyFilter() {
     const q = (document.getElementById("uid-search")?.value || "").toLowerCase().trim();
+    const hideCancelled = document.getElementById("uid-hide-cancelled-cb")?.checked ?? true;
     let visibleCount = 0;
 
     this.panel.querySelectorAll(".uid-table-row").forEach((tr) => {
       const oid = tr.dataset.oid;
       const info = this.ordersMap.get(oid);
       if (!info) return;
+
+      const isInvalid = info.isCancelled || info.isRefunded || info.price === "Storniert" || /storniert|cancelled|erstattet|refunded/i.test(info.price);
+      if (hideCancelled && isInvalid) {
+        tr.style.display = "none";
+        return;
+      }
 
       const match = !q || 
         info.id.toLowerCase().includes(q) || 
@@ -739,15 +757,21 @@ class UniversalDashboard {
     const fill = this.panel.querySelector("#uid-progress-fill");
     const pText = this.panel.querySelector("#uid-progress-text");
 
-    if (total === 0) {
+    if (current < 0 || total === 0 || (current === 0 && total === undefined)) {
       if (wrap) wrap.style.display = "none";
       return;
     }
 
     if (wrap) wrap.style.display = "block";
-    const pct = Math.round((current / total) * 100);
+    let pct = 0;
+    if (total !== undefined && total > 0) {
+      pct = Math.round((current / total) * 100);
+      if (pText) pText.textContent = text || `${current} / ${total} (${pct}%)`;
+    } else {
+      pct = Math.min(100, Math.max(0, Math.round(current)));
+      if (pText) pText.textContent = text || `${pct}%`;
+    }
     if (fill) fill.style.width = `${pct}%`;
-    if (pText) pText.textContent = text || `${current} / ${total} (${pct}%)`;
   }
 }
 
@@ -996,6 +1020,8 @@ class AmazonAdapter {
         shortName: shortName,
         quantity: totalQty,
         price: price,
+        isCancelled: isCancelled,
+        isRefunded: isRefunded,
         imageUrl: imageUrl,
         popoverUrl: popoverUrl,
         cardElement: isLivePage ? card : null
@@ -1126,8 +1152,7 @@ class AmazonAdapter {
       const p = queue[currentIndex];
       currentIndex++;
 
-      const pct = Math.round((currentIndex / totalToLoad) * 100);
-      this.ui.setProgress(pct);
+      this.ui.setProgress(currentIndex, totalToLoad);
       this.ui.setStatus(`⏳ Lade Seite ${p.num} von ${Math.ceil((totalOrders || queue.length * 10) / 10)} (${this.ui.ordersMap.size} Bestellungen erfasst)...`);
 
       try {
@@ -1145,8 +1170,8 @@ class AmazonAdapter {
     }
 
     this.isLoadingPages = false;
-    this.ui.setProgress(100);
-    setTimeout(() => this.ui.setProgress(-1), 3000);
+    this.ui.setProgress(100, 100);
+    setTimeout(() => this.ui.setProgress(-1, 0), 2500);
 
     if (loadBtn) {
       loadBtn.textContent = "🔄 Alle Seiten nachladen";
