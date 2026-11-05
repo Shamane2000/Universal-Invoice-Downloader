@@ -42,11 +42,18 @@ export function sanitizeTitle(raw, maxLen = 32) {
 export function parseGermanDate(text) {
   if (!text) return "20260101";
   const cleaned = cleanString(text);
-  const m = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
+  const m = cleaned.match(/(\d{1,2})\.?\s+([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
   if (m) {
     const day = m[1].padStart(2, "0");
     const mon = MONTH_MAP_DE[m[2].toLowerCase()] || MONTH_MAP_EN[m[2].toLowerCase()] || "01";
     const year = m[3];
+    return `${year}${mon}${day}`;
+  }
+  const mDot = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
+  if (mDot) {
+    const day = mDot[1].padStart(2, "0");
+    const mon = MONTH_MAP_DE[mDot[2].toLowerCase()] || MONTH_MAP_EN[mDot[2].toLowerCase()] || "01";
+    const year = mDot[3];
     return `${year}${mon}${day}`;
   }
   const mEn = cleaned.match(/([a-zA-Z]{3,12})\s*(\d{1,2}),?\s*(\d{4})/);

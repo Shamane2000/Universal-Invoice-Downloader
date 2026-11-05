@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Amazon Pro Invoice Downloader (v1.1 Modular Edition)
+// @name         Amazon Pro Invoice Downloader (v1.2 Modular Edition)
 // @namespace    https://github.com/Shamane2000/Universal-Invoice-Downloader
-// @version      1.1.0
-// @description  Automatisierter PDF-Rechnungs-Download für Amazon mit präziser data-csa-c-slot-id Extraktion, Quickinfo-Hover, Tabellenlink & sauberem Kompakt-Modus
+// @version      1.2.0
+// @description  Automatisierter PDF-Rechnungs-Download & ZIP-Archivierung für Amazon mit data-csa-c-slot-id Extraktion, Spaltensortierung, Quickinfo-Hover & Kompakt-Modus
 // @match        https://*.amazon.de/*order*
 // @match        https://*.amazon.com/*order*
 // @grant        GM_download
@@ -59,11 +59,18 @@ function sanitizeTitle(raw, maxLen = 32) {
 function parseGermanDate(text) {
   if (!text) return "20260101";
   const cleaned = cleanString(text);
-  const m = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
+  const m = cleaned.match(/(\d{1,2})\.?\s+([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
   if (m) {
     const day = m[1].padStart(2, "0");
     const mon = MONTH_MAP_DE[m[2].toLowerCase()] || MONTH_MAP_EN[m[2].toLowerCase()] || "01";
     const year = m[3];
+    return `${year}${mon}${day}`;
+  }
+  const mDot = cleaned.match(/(\d{1,2})\.\s*([a-zA-ZäöüÄÖÜ]{3,12})\.?\s*(\d{4})/);
+  if (mDot) {
+    const day = mDot[1].padStart(2, "0");
+    const mon = MONTH_MAP_DE[mDot[2].toLowerCase()] || MONTH_MAP_EN[mDot[2].toLowerCase()] || "01";
+    const year = mDot[3];
     return `${year}${mon}${day}`;
   }
   const mEn = cleaned.match(/([a-zA-Z]{3,12})\s*(\d{1,2}),?\s*(\d{4})/);
@@ -135,10 +142,112 @@ function requestHtml(url, options = {}) {
 
 
 /**
- * Core Downloader: Batch Queue Runner, Throttling & GM_download Handling
+ * Core Downloader: Batch Queue Runner, Throttling, ZIP Bundling & Multi-stage Download Handling
  */
 
 
+
+class SimpleZip {
+  constructor() {
+    this.files = [];
+  }
+
+  static crc32(buf) {
+    let table = SimpleZip.crcTable;
+    if (!table) {
+      table = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        table[i] = c >>> 0;
+      }
+      SimpleZip.crcTable = table;
+    }
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) {
+      crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  addFile(filename, uint8Data) {
+    this.files.push({ name: filename, data: uint8Data });
+  }
+
+  buildBlob() {
+    const encoder = new TextEncoder();
+    const parts = [];
+    const cdParts = [];
+    let offset = 0;
+
+    for (const f of this.files) {
+      const nameBytes = encoder.encode(f.name);
+      const dataBytes = f.data;
+      const crc = SimpleZip.crc32(dataBytes);
+      const size = dataBytes.length;
+
+      // Local File Header (30 Bytes)
+      const lh = new Uint8Array(30);
+      const dvLh = new DataView(lh.buffer);
+      dvLh.setUint32(0, 0x04034b50, true);
+      dvLh.setUint16(4, 10, true);
+      dvLh.setUint16(6, 0x0800, true); // UTF-8 Filename Flag
+      dvLh.setUint16(8, 0, true);      // Uncompressed (Stored)
+      dvLh.setUint16(10, 0, true);
+      dvLh.setUint16(12, 0, true);
+      dvLh.setUint32(14, crc, true);
+      dvLh.setUint32(18, size, true);
+      dvLh.setUint32(22, size, true);
+      dvLh.setUint16(26, nameBytes.length, true);
+      dvLh.setUint16(28, 0, true);
+
+      parts.push(lh, nameBytes, dataBytes);
+
+      // Central Directory Header (46 Bytes)
+      const cd = new Uint8Array(46);
+      const dvCd = new DataView(cd.buffer);
+      dvCd.setUint32(0, 0x02014b50, true);
+      dvCd.setUint16(4, 20, true);
+      dvCd.setUint16(6, 10, true);
+      dvCd.setUint16(8, 0x0800, true);
+      dvCd.setUint16(10, 0, true);
+      dvCd.setUint16(12, 0, true);
+      dvCd.setUint16(14, 0, true);
+      dvCd.setUint32(16, crc, true);
+      dvCd.setUint32(20, size, true);
+      dvCd.setUint32(24, size, true);
+      dvCd.setUint16(28, nameBytes.length, true);
+      dvCd.setUint16(30, 0, true);
+      dvCd.setUint16(32, 0, true);
+      dvCd.setUint16(34, 0, true);
+      dvCd.setUint16(36, 0, true);
+      dvCd.setUint32(38, 0, true);
+      dvCd.setUint32(42, offset, true);
+
+      cdParts.push(cd, nameBytes);
+
+      offset += lh.length + nameBytes.length + dataBytes.length;
+    }
+
+    const cdOffset = offset;
+    let cdSize = 0;
+    for (const p of cdParts) cdSize += p.length;
+
+    // End of Central Directory Record (22 Bytes)
+    const eocd = new Uint8Array(22);
+    const dvEocd = new DataView(eocd.buffer);
+    dvEocd.setUint32(0, 0x06054b50, true);
+    dvEocd.setUint16(4, 0, true);
+    dvEocd.setUint16(6, 0, true);
+    dvEocd.setUint16(8, this.files.length, true);
+    dvEocd.setUint16(10, this.files.length, true);
+    dvEocd.setUint32(12, cdSize, true);
+    dvEocd.setUint32(16, cdOffset, true);
+    dvEocd.setUint16(20, 0, true);
+
+    return new Blob([...parts, ...cdParts, eocd], { type: "application/zip" });
+  }
+}
 
 class BatchDownloader {
   constructor(options = {}) {
@@ -161,6 +270,43 @@ class BatchDownloader {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+  }
+
+  async fetchBinaryData(url) {
+    if (url.startsWith("data:")) {
+      const base64 = url.split(",")[1];
+      const binaryStr = atob(base64);
+      const len = binaryStr.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        const ab = await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            responseType: "arraybuffer",
+            onload: (res) => {
+              if (res.response) resolve(new Uint8Array(res.response));
+              else reject(new Error("Keine Binärdaten empfangen"));
+            },
+            onerror: reject,
+            ontimeout: reject
+          });
+        });
+        return ab;
+      } catch (e) {}
+    }
+
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const ab = await res.arrayBuffer();
+    return new Uint8Array(ab);
   }
 
   async downloadFile(downloadUrl, targetFilename, subfolder = "invoices") {
@@ -261,7 +407,51 @@ class BatchDownloader {
     this.isRunning = false;
     if (onComplete) onComplete(this.isCancelled);
   }
+
+  async runBatchZip(items, resolveUrlFn, zipFilename = "rechnungen.zip", callbacks = {}) {
+    const { onStart, onProgress, onItemComplete, onItemError, onComplete } = callbacks;
+    this.isRunning = true;
+    this.isCancelled = false;
+    const zip = new SimpleZip();
+    let packedCount = 0;
+
+    if (onStart) onStart(items.length);
+
+    for (let i = 0; i < items.length; i++) {
+      if (this.isCancelled) break;
+
+      const item = items[i];
+      if (onProgress) onProgress(i + 1, items.length, item);
+
+      try {
+        const downloadInfo = await resolveUrlFn(item);
+        if (downloadInfo && downloadInfo.url) {
+          const binaryData = await this.fetchBinaryData(downloadInfo.url);
+          zip.addFile(downloadInfo.filename, binaryData);
+          packedCount++;
+          if (onItemComplete) onItemComplete(item, downloadInfo);
+        } else {
+          if (onItemError) onItemError(item, new Error("Keine Rechnungs-URL auffindbar"));
+        }
+      } catch (err) {
+        if (onItemError) onItemError(item, err);
+      }
+
+      if (i < items.length - 1 && !this.isCancelled) {
+        await sleep(this.delayMs);
+      }
+    }
+
+    if (packedCount > 0 && !this.isCancelled) {
+      const zipBlob = zip.buildBlob();
+      this.downloadBlob(zipBlob, zipFilename);
+    }
+
+    this.isRunning = false;
+    if (onComplete) onComplete(this.isCancelled, packedCount);
+  }
 }
+
 
 
 /**
@@ -382,13 +572,18 @@ class UniversalDashboard {
           </div>
         </div>
 
-        <div style="display:flex; gap:8px;">
-          <button id="uid-dl-btn" style="flex:2; padding:9px; background:linear-gradient(to bottom, #f7dfa5, #f0c14b); border:1px solid #a88734; border-radius:6px; font-weight:700; font-size:13px; color:#111; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
-            📥 Ausgewählte PDFs laden (0)
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <button id="uid-zip-btn" style="width:100%; padding:9px; background:linear-gradient(to bottom, #f7dfa5, #f0c14b); border:1px solid #a88734; border-radius:6px; font-weight:700; font-size:13px; color:#111; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.1); display:flex; align-items:center; justify-content:center; gap:6px;">
+            📦 Als ZIP-Archiv laden (0)
           </button>
-          <button id="uid-test-btn" style="flex:1; padding:9px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:12px; color:#111; cursor:pointer;" title="Lädt nur die 1. markierte Bestellung zum Testen">
-            🧪 Test (#1)
-          </button>
+          <div style="display:flex; gap:6px;">
+            <button id="uid-dl-btn" style="flex:2; padding:7px 8px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:11px; color:#111; cursor:pointer;" title="Lädt jede PDF als einzelne Datei herunter">
+              📥 PDFs einzeln laden (0)
+            </button>
+            <button id="uid-test-btn" style="flex:1; padding:7px 8px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:11px; color:#111; cursor:pointer;" title="Lädt 1 Rechnung zur Probe">
+              🧪 Test (#1)
+            </button>
+          </div>
         </div>
 
         <div id="uid-status" style="margin-top:8px; font-size:11px; color:#555; text-align:center; min-height:16px;"></div>
@@ -519,6 +714,13 @@ class UniversalDashboard {
     this.panel.querySelector("#uid-dl-btn").onclick = () => {
       if (this.callbacks.onDownloadBatch) this.callbacks.onDownloadBatch(Array.from(this.selectedOrders));
     };
+
+    const zipBtn = this.panel.querySelector("#uid-zip-btn");
+    if (zipBtn) {
+      zipBtn.onclick = () => {
+        if (this.callbacks.onDownloadZip) this.callbacks.onDownloadZip(Array.from(this.selectedOrders));
+      };
+    }
 
     this.panel.querySelector("#uid-test-btn").onclick = () => {
       if (this.callbacks.onDownloadTest) this.callbacks.onDownloadTest();
@@ -681,7 +883,7 @@ class UniversalDashboard {
         </td>
         <td style="padding:4px;white-space:nowrap;color:#64748b;">${dDisplay}</td>
         <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="${info.title}">
-          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
+          <a href="${info.detailsUrl || ('https://www.amazon.de/gp/your-account/order-details?orderID=' + info.id)}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
             ${info.shortName}
           </a>
         </td>
@@ -739,9 +941,16 @@ class UniversalDashboard {
       badge.textContent = `Ausgewählt: ${this.selectedOrders.size} von ${currentVisible}`;
     }
 
+    const zipBtn = this.panel.querySelector("#uid-zip-btn");
+    if (zipBtn) {
+      zipBtn.innerHTML = `📦 Als ZIP-Archiv laden (${this.selectedOrders.size})`;
+      zipBtn.disabled = this.selectedOrders.size === 0;
+      zipBtn.style.opacity = this.selectedOrders.size === 0 ? "0.6" : "1";
+    }
+
     const dlBtn = this.panel.querySelector("#uid-dl-btn");
     if (dlBtn) {
-      dlBtn.textContent = `📥 Ausgewählte PDFs laden (${this.selectedOrders.size})`;
+      dlBtn.textContent = `📥 PDFs einzeln laden (${this.selectedOrders.size})`;
       dlBtn.disabled = this.selectedOrders.size === 0;
       dlBtn.style.opacity = this.selectedOrders.size === 0 ? "0.6" : "1";
     }
@@ -1245,8 +1454,9 @@ class AmazonAdapter {
 
 
   /* ==========================================================================
-     APP INITIALISIERUNG
+     APP INITIALISIERUNG (Amazon)
      ========================================================================== */
+  const isWorker = window.location.pathname.includes("/order/detail.html") || window.location.pathname.includes("/tax-ui/");
   const downloader = new BatchDownloader(1800);
   let adapter = null;
 
@@ -1273,11 +1483,42 @@ class AmazonAdapter {
             },
             onProgress: (cur, total, item) => {
               ui.setProgress(cur, total);
-              ui.setStatus(`[${cur}/${total}] Lade PDF: ${item.shortName} ...`);
+              ui.setStatus(`[${cur}/${total}] Lade: ${item.shortName} ...`);
             },
             onComplete: () => {
-              ui.setStatus(`✅ Fertig! Gespeichert in: Downloads/invoices/amazon/`);
+              ui.setStatus(`✅ Fertig! Gespeichert im Download-Ordner.`);
               if (dlBtn) dlBtn.disabled = false;
+              if (adapter.closeWorker) adapter.closeWorker();
+            }
+          }
+        );
+      },
+      onDownloadZip: async (selectedIds) => {
+        if (selectedIds.length === 0 || !adapter) return;
+        const items = selectedIds.map(id => ui.ordersMap.get(id)).filter(Boolean);
+
+        const zipBtn = document.getElementById("uid-zip-btn");
+        if (zipBtn) zipBtn.disabled = true;
+
+        const currentYear = new URLSearchParams(window.location.search).get("orderFilter")?.replace("year-", "") || new Date().getFullYear();
+        const zipFilename = `Amazon_Rechnungen_${currentYear}.zip`;
+
+        await downloader.runBatchZip(
+          items,
+          (order) => adapter.resolveDownloadInfo(order),
+          zipFilename,
+          {
+            onStart: (total) => {
+              ui.setProgress(0, total, `0 / ${total} (0%)`);
+            },
+            onProgress: (cur, total, item) => {
+              ui.setProgress(cur, total);
+              ui.setStatus(`[${cur}/${total}] Packe in ZIP: ${item.shortName} ...`);
+            },
+            onComplete: (cancelled, packedCount) => {
+              ui.setStatus(`✅ Fertig! ${packedCount} Belege in <b>${zipFilename}</b> gepackt.`);
+              if (zipBtn) zipBtn.disabled = false;
+              if (adapter.closeWorker) adapter.closeWorker();
             }
           }
         );
@@ -1288,18 +1529,25 @@ class AmazonAdapter {
                           Array.from(ui.ordersMap.values()).find(o => o && o.price !== "Storniert") ||
                           Array.from(ui.ordersMap.values())[0];
         ui.setStatus(`🧪 Test-Download für <b>${testOrder.id}</b> (${testOrder.shortName})...`);
-        const info = await adapter.resolveDownloadInfo(testOrder);
-        if (info && info.url) {
-          await downloader.downloadFile(info.url, info.filename, info.subfolder);
-          ui.setStatus(`✅ Test-PDF heruntergeladen: <b>${info.filename}</b>`);
-        } else {
-          ui.setStatus(`⚠️ Rechnungs-URL für ${testOrder.id} nicht verfügbar.`);
+        try {
+          const info = await adapter.resolveDownloadInfo(testOrder);
+          if (info && info.url) {
+            await downloader.downloadFile(info.url, info.filename, info.subfolder);
+            ui.setStatus(`✅ Test-Beleg heruntergeladen: <b>${info.filename}</b>`);
+          } else {
+            ui.setStatus(`⚠️ Belegs-URL für ${testOrder.id} nicht verfügbar.`);
+          }
+        } catch (err) {
+          ui.setStatus(`❌ Fehler: ${err.message}`);
         }
       }
     }
   });
 
-  ui.mount();
+  if (!isWorker) {
+    ui.mount();
+  }
+
   adapter = new AmazonAdapter(ui);
   adapter.init();
 })();

@@ -116,13 +116,18 @@ export class UniversalDashboard {
           </div>
         </div>
 
-        <div style="display:flex; gap:8px;">
-          <button id="uid-dl-btn" style="flex:2; padding:9px; background:linear-gradient(to bottom, #f7dfa5, #f0c14b); border:1px solid #a88734; border-radius:6px; font-weight:700; font-size:13px; color:#111; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.1);">
-            📥 Ausgewählte PDFs laden (0)
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <button id="uid-zip-btn" style="width:100%; padding:9px; background:linear-gradient(to bottom, #f7dfa5, #f0c14b); border:1px solid #a88734; border-radius:6px; font-weight:700; font-size:13px; color:#111; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.1); display:flex; align-items:center; justify-content:center; gap:6px;">
+            📦 Als ZIP-Archiv laden (0)
           </button>
-          <button id="uid-test-btn" style="flex:1; padding:9px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:12px; color:#111; cursor:pointer;" title="Lädt nur die 1. markierte Bestellung zum Testen">
-            🧪 Test (#1)
-          </button>
+          <div style="display:flex; gap:6px;">
+            <button id="uid-dl-btn" style="flex:2; padding:7px 8px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:11px; color:#111; cursor:pointer;" title="Lädt jede PDF als einzelne Datei herunter">
+              📥 PDFs einzeln laden (0)
+            </button>
+            <button id="uid-test-btn" style="flex:1; padding:7px 8px; background:#f0f2f5; border:1px solid #d1d5db; border-radius:6px; font-weight:600; font-size:11px; color:#111; cursor:pointer;" title="Lädt 1 Rechnung zur Probe">
+              🧪 Test (#1)
+            </button>
+          </div>
         </div>
 
         <div id="uid-status" style="margin-top:8px; font-size:11px; color:#555; text-align:center; min-height:16px;"></div>
@@ -253,6 +258,13 @@ export class UniversalDashboard {
     this.panel.querySelector("#uid-dl-btn").onclick = () => {
       if (this.callbacks.onDownloadBatch) this.callbacks.onDownloadBatch(Array.from(this.selectedOrders));
     };
+
+    const zipBtn = this.panel.querySelector("#uid-zip-btn");
+    if (zipBtn) {
+      zipBtn.onclick = () => {
+        if (this.callbacks.onDownloadZip) this.callbacks.onDownloadZip(Array.from(this.selectedOrders));
+      };
+    }
 
     this.panel.querySelector("#uid-test-btn").onclick = () => {
       if (this.callbacks.onDownloadTest) this.callbacks.onDownloadTest();
@@ -415,7 +427,7 @@ export class UniversalDashboard {
         </td>
         <td style="padding:4px;white-space:nowrap;color:#64748b;">${dDisplay}</td>
         <td style="padding:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="${info.title}">
-          <a href="https://www.amazon.de/gp/your-account/order-details?orderID=${info.id}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
+          <a href="${info.detailsUrl || ('https://www.amazon.de/gp/your-account/order-details?orderID=' + info.id)}" target="_blank" style="text-decoration:none;color:#0f1111;font-weight:500;" onclick="event.stopPropagation();" title="Klick öffnet Bestelldetails in neuem Tab">
             ${info.shortName}
           </a>
         </td>
@@ -473,9 +485,16 @@ export class UniversalDashboard {
       badge.textContent = `Ausgewählt: ${this.selectedOrders.size} von ${currentVisible}`;
     }
 
+    const zipBtn = this.panel.querySelector("#uid-zip-btn");
+    if (zipBtn) {
+      zipBtn.innerHTML = `📦 Als ZIP-Archiv laden (${this.selectedOrders.size})`;
+      zipBtn.disabled = this.selectedOrders.size === 0;
+      zipBtn.style.opacity = this.selectedOrders.size === 0 ? "0.6" : "1";
+    }
+
     const dlBtn = this.panel.querySelector("#uid-dl-btn");
     if (dlBtn) {
-      dlBtn.textContent = `📥 Ausgewählte PDFs laden (${this.selectedOrders.size})`;
+      dlBtn.textContent = `📥 PDFs einzeln laden (${this.selectedOrders.size})`;
       dlBtn.disabled = this.selectedOrders.size === 0;
       dlBtn.style.opacity = this.selectedOrders.size === 0 ? "0.6" : "1";
     }
